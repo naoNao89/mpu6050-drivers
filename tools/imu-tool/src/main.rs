@@ -1,6 +1,36 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+#[derive(Clone, Debug)]
+enum ExpectedIdentityArg {
+    ClassicMpu6050,
+    Mpu6500Compatible,
+    AnyKnown,
+    Exact(u8),
+}
+
+impl From<ExpectedIdentityArg> for imu_tool::ExpectedIdentity {
+    fn from(value: ExpectedIdentityArg) -> Self {
+        match value {
+            ExpectedIdentityArg::ClassicMpu6050 => Self::ClassicMpu6050,
+            ExpectedIdentityArg::Mpu6500Compatible => Self::Mpu6500Compatible,
+            ExpectedIdentityArg::AnyKnown => Self::AnyKnown,
+            ExpectedIdentityArg::Exact(v) => Self::Exact(v),
+        }
+    }
+}
+
+impl ExpectedIdentityArg {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "classic_mpu6050" | "classic-mpu6050" | "mpu6050" => Ok(Self::ClassicMpu6050),
+            "mpu6500_compatible" | "mpu6500-compatible" | "mpu6500" => Ok(Self::Mpu6500Compatible),
+            "any_known" | "any-known" | "any" => Ok(Self::AnyKnown),
+            _ => Ok(Self::Exact(parse_hex_u8(s)?)),
+        }
+    }
+}
+
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
@@ -85,8 +115,10 @@ enum Command {
         min_stationary_samples: usize,
         #[arg(long, default_value = "0x68")]
         expected_address: String,
-        #[arg(long, default_value = "0x70")]
-        expected_whoami: String,
+        #[arg(long = "expected-identity", value_parser = ExpectedIdentityArg::parse, default_value = "any-known")]
+        expected_identity: ExpectedIdentityArg,
+        #[arg(long = "expected-whoami", hide = true, value_parser = ExpectedIdentityArg::parse)]
+        expected_whoami_legacy: Option<ExpectedIdentityArg>,
     },
     OrientationAnalyze {
         log: PathBuf,
@@ -149,8 +181,12 @@ impl From<ValidationModeArg> for imu_tool::ValidationMode {
     }
 }
 
+fn parse_hex_u8(s: &str) -> Result<u8, String> {
+    u8::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|_| format!("invalid hex byte: {s}"))
+}
+
 fn parse_hex(s: &str) -> i32 {
-    i32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap()
+    parse_hex_u8(s).unwrap() as i32
 }
 
 fn main() -> std::process::ExitCode {
@@ -216,13 +252,14 @@ fn main() -> std::process::ExitCode {
             min_samples,
             min_stationary_samples,
             expected_address,
-            expected_whoami,
+            expected_identity,
+            expected_whoami_legacy,
         } => imu_tool::analyze(
             &log,
             min_samples,
             min_stationary_samples,
             parse_hex(&expected_address),
-            parse_hex(&expected_whoami),
+            expected_whoami_legacy.unwrap_or(expected_identity).into(),
         )
         .map_err(Into::into),
         Command::OrientationAnalyze {

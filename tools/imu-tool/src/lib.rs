@@ -19,6 +19,25 @@ pub enum ValidationMode {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpectedIdentity {
+    ClassicMpu6050,
+    Mpu6500Compatible,
+    AnyKnown,
+    Exact(u8),
+}
+
+impl ExpectedIdentity {
+    fn matches(self, observed: u8) -> bool {
+        match self {
+            Self::ClassicMpu6050 => observed == 0x68,
+            Self::Mpu6500Compatible => observed == 0x70,
+            Self::AnyKnown => matches!(observed, 0x68 | 0x70),
+            Self::Exact(expected) => observed == expected,
+        }
+    }
+}
+
 fn stationary_suite_exit_code(
     tool_return_codes: [i32; 5],
     validation_mode: ValidationMode,
@@ -356,7 +375,13 @@ pub fn stationary_suite(
     let started = chrono::Local::now().to_rfc3339();
     let capture_rc = capture(port, baud, seconds, &raw)?;
     let export_rc = export_csv(&raw, &csv, sample_rate_hz)?;
-    let analyze_rc = analyze(&raw, min_samples, min_stationary, 0x68, 0x70)?;
+    let analyze_rc = analyze(
+        &raw,
+        min_samples,
+        min_stationary,
+        0x68,
+        ExpectedIdentity::AnyKnown,
+    )?;
     let (_, raw_samples) = parse_log(&raw)?;
     let validation_samples: Vec<_> = raw_samples
         .iter()
@@ -1065,22 +1090,43 @@ pub fn analyze(
     min_samples: usize,
     _min_stationary: usize,
     addr: i32,
-    who: i32,
+    expected_identity: ExpectedIdentity,
 ) -> std::io::Result<i32> {
     let (kv, s) = parse_log(path)?;
     let address_ok = kv.get("bus_address").is_some_and(|v| {
         v.iter()
             .any(|x| x.eq_ignore_ascii_case(&format!("0x{addr:02x}")))
     });
-    let who_ok = kv.get("who_am_i").is_some_and(|v| {
-        v.iter()
-            .any(|x| x.eq_ignore_ascii_case(&format!("0x{who:02x}")))
+    let identity_observed = kv.get("who_am_i").and_then(|v| {
+        v.iter().rev().find_map(|x| {
+            let x = x.trim();
+            let x = x.strip_prefix("0x").unwrap_or(x);
+            u8::from_str_radix(x, 16).ok()
+        })
     });
+    let who_ok = kv.get("who_am_i").is_some_and(|v| {
+        v.iter().any(|x| {
+            let x = x.trim();
+            let x = x.strip_prefix("0x").unwrap_or(x);
+            u8::from_str_radix(x, 16)
+                .ok()
+                .is_some_and(|who| expected_identity.matches(who))
+        })
+    });
+    let identity_profile = match identity_observed {
+        Some(0x68) => "classic_mpu6050",
+        Some(0x70) => "mpu6500_compatible_or_clone",
+        Some(_) => "unknown",
+        None => "missing",
+    };
+    let identity_observed_text = identity_observed
+        .map(|who| format!("0x{who:02x}"))
+        .unwrap_or_else(|| "missing".into());
     let pwr_ok = kv
         .get("pwr_mgmt_1")
         .is_some_and(|v| v.last().is_some_and(|x| x != "unreadable"));
     println!(
-        "validation_report_begin\nlog={}\nsamples={}\nbus_address_values={}\nwho_am_i_values={}\nhost_validation_score={}\nvalidation_report_end",
+        "validation_report_begin\nlog={}\nsamples={}\nbus_address_values={}\nwho_am_i_values={}\nidentity_observed={}\nidentity_profile={}\nclaim=not_genuine_proof\nhost_validation_score={}\nvalidation_report_end",
         path.display(),
         s.len(),
         kv.get("bus_address")
@@ -1089,6 +1135,8 @@ pub fn analyze(
         kv.get("who_am_i")
             .map(|v| v.join(","))
             .unwrap_or_else(|| "missing".into()),
+        identity_observed_text,
+        identity_profile,
         if address_ok && who_ok && pwr_ok && s.len() >= min_samples {
             10
         } else {
