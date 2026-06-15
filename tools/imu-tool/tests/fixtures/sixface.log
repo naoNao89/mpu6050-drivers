@@ -1,0 +1,81 @@
+# face_begin +X
+# face_help +X make the sensor/module +X axis point upward; keep still
+ry app      00 00 00010000 003f0000[0m
+[0;32mI (82) boot: End of partition table[0m
+[0;32mI (86) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=03744h ( 14148) map[0m
+[0;32mI (97) esp_image: segment 1: paddr=0001376c vaddr=3fc80aa8 size=007a8h (  1960) load[0m
+[0;32mI (103) esp_image: segment 2: paddr=00013f1c vaddr=40380000 size=00aa8h (  2728) load[0m
+[0;32mI (112) esp_image: segment 3: paddr=000149cc vaddr=00000000 size=0b64ch ( 46668) [0m
+[0;32mI (130) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=09f4ch ( 40780) map[0m
+[0;32mI (139) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (140) boot: Disabling RNG early entropy source...[0m
+MPU6050 ESP32-C3 esp-hal I2C bring-up started
+Wiring: VCC=3V GND=GND SCL=GPIO0 SDA=GPIO1 AD0=GPIO5 INT=GPIO6
+Pre-I2C idle check: SCL=HIGH SDA=HIGH
+AD0 driven LOW on GPIO5; expected 7-bit address is 0x68
+I2C0 initialized at 100 kHz: SCL=GPIO0 SDA=GPIO1
+I2C candidate scan: 0x68, 0x69
+ACK/read at 0x68: WHO_AM_I=0x70
+No read at 0x69: AcknowledgeCheckFailed(Unknown)
+Probing bus_address=0x68
+bus_address=0x68 who_am_i=0x70 identity=MPU-6500-compatible / clone / relabeled variant
+bus_address=0x68 pwr_mgmt_1=0x01
+bus_address=0x68 raw_block_0x3b_readable=true
+Probing bus_address=0x69
+0x69: WHO_AM_I read failed: AcknowledgeCheckFailed(Unknown)
+0x69: PWR_MGMT_1 read failed: AcknowledgeCheckFailed(Unknown)
+bus_address=0x69 raw_block_0x3b_readable=false
+verification_summary_begin
+bus_address=0x68
+who_am_i=0x70
+pwr_mgmt_1=0x01
+identity_verdict=Mpu6500CompatibleNonClassic
+verification_score=11
+verification_level=I2cResponsiveCompatibleDevice
+non_classic_identity=true
+pending_tests=six_face,accel_scale_range,gyro_scale_range,gyro_bias,temp_sanity,self_test,fifo_interrupt,timing_noise
+verification_summary_end
+advanced_validation_begin
+advanced reset_wake_begin
+advanced reset_wake reset_ok=true wake_ok=true config_ok=true sample_ok=true accel_cfg_ok=true gyro_cfg_ok=true pwr_mgmt_1=0x01 config=0x03 smplrt_div=0x09
+advanced reset_wake_end
+advanced scale_range_begin
+advanced scale_range setting=0 accel_write=true accel_reg=0x00 accel_match=true gyro_write=true gyro_reg=0x00 gyro_match=true
+advanced scale_range setting=1 accel_write=true accel_reg=0x08 accel_match=true gyro_write=true gyro_reg=0x08 gyro_match=true
+advanced scale_range setting=2 accel_write=true accel_reg=0x10 accel_match=true gyro_write=true gyro_reg=0x10 gyro_match=true
+advanced scale_range setting=3 accel_write=true accel_reg=0x18 accel_match=true gyro_write=true gyro_reg=0x18 gyro_match=true
+advanced scale_range_end
+advanced self_test_begin
+advanced self_test accel_st_write=true gyro_st_write=true baseline_accel=(5629,-536,14603) selftest_accel=(15236,10989,25135) baseline_gyro=(2806,4436,-7377) selftest_gyro=(18148,18732,22527) accel_delta_sum=31664 gyro_delta_sum=59542 coarse_response=true
+advanced self_test_end
+advanced fifo_timing_begin
+advanced fifo_timing disable_fifo_ok=true user_reset_ok=true enable_sources_ok=true enable_fifo_ok=true count0=0 count1=300 frame_bytes=12 frame_read_ok=true disable_after_ok=true
+advanced fifo_timing_end
+advanced int_status_begin
+advanced int_status enable_ok=true int_status=0x05 data_ready=true fifo_overflow=false
+advanced int_status_end
+advanced_validation_end
+Repeating raw read from 0x68 every 1s
+RAW 0x68: accel=(9708, 4304, 13400) temp_raw=4062 gyro=(-3249, 135, 4239)
+RAW 0x68: accel=(6836, -1040, 16152) temp_raw=4061 gyro=(397, 1337, -844)
+RAW 0x68: accel=(-2768, -884, 16832) temp_raw=4060 gyro=(-1766, 3550, -4904)
+RAW 0x68: accel=(-2620, 228, 17904) temp_raw=4061 gyro=(-1484, 42, 2367)
+RAW 0x68: accel=(-1492, -3304, 17112) temp_raw=4067 gyro=(669, 960, 352)
+RAW 0x68: accel=(-2152, -2868, 17056) temp_raw=4082 gyro=(987, 504, -889)
+RAW 0x68: accel=(-2176, 24668, 3880) temp_raw=4106 gyro=(-174, 3505, -7173)
+RAW 0x68: accel=(1444, 11188, 3552) temp_raw=4128 gyro=(-657, -11390, -13806)
+RAW 0x68: accel=(-3352, 15800, 2868) temp_raw=4184 gyro=(596, 253, -965)
+RAW 0x68: accel=(-3732, 16084, 2600) temp_raw=4231 gyro=(629, -86, -20)
+RAW 0x68: accel=(-3768, 15976, 2200) temp_raw=4274 gyro=(885, 400, -695)
+RAW 0x68: accel=(-4200, 15768, 2324) temp_raw=4317 gyro=(539, 192, 47)
+RAW 0x68: accel=(-392, 16600, 1524) temp_raw=4347 gyro=(758, 498, -547)
+RAW 0x68: accel=(-888, 16532, 1396) temp_raw=4386 gyro=(504, 763, -903)
+RAW 0x68: accel=(-1508, 16432, 1768) temp_raw=4408 gyro=(576, 525, -442)
+RAW 0x68: accel=(-1472, 16568, 1288) temp_raw=4435 gyro=(755, 762, -623)
+RAW 0x68: accel=(-1356, 16372, 1540) temp_raw=4463 gyro=(32, 366, 197)
+RAW 0x68: accel=(-2596, 16328, 1448) temp_raw=4491 gyro=(696, -395, -644)
+RAW 0x68: accel=(-2128, 16416, 1464) temp_raw=4513 gyro=(583, 172, -133)
+RAW 0x68: accel=(-1992, 16388, 1652) temp_raw=4545 gyro=(626, 420, -410)
+RAW 0x68: accel=(-7216, -8184, 14668) temp_raw=4567 gyro=(-14029, 4571, -3154)
+RAW 0x68: accel=(-8128, -12300, 7596) temp_raw=4580 gyro=(16184, -8921, -8832)
+# face_end +X

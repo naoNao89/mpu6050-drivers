@@ -1,0 +1,11 @@
+{
+  "description": "Example fixture mapping for six-face certification. Edit this to match your physical board/fixture labels. Do not change it just to make bad data pass.",
+  "faces": {
+    "+X": "+X",
+    "-X": "-X",
+    "+Y": "+Y",
+    "-Y": "-Y",
+    "+Z": "+Z",
+    "-Z": "-Z"
+  }
+}

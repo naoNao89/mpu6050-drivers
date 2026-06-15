@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Build, flash, and monitor the ESP32-C3 MPU6050 bring-up firmware.
+#
+# Examples:
+#   ./run.sh
+#   PORT=/dev/cu.usbmodem11301 ./run.sh
+#   NO_FLASH=1 ./run.sh
+#   NO_MONITOR=1 ./run.sh
+#   NO_LOG=1 ./run.sh
+#   LOG_FILE=logs/mpu6050.log ./run.sh
+
+set -euo pipefail
+
+if [ -f "$HOME/export-esp.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/export-esp.sh"
+fi
+
+PORT="${PORT:-}"
+BAUD="${BAUD:-115200}"
+TARGET="${TARGET:-riscv32imc-unknown-none-elf}"
+LOG_DIR="${LOG_DIR:-logs}"
+LOG_FILE="${LOG_FILE:-}"
+BIN="target/${TARGET}/release/mpu6050-esp32c3-bringup"
+
+if [ -z "$PORT" ]; then
+  PORT="$(./scripts/esp-port.sh --print)"
+fi
+
+if [ "${NO_LOG:-0}" != "1" ] && [ -z "$LOG_FILE" ]; then
+  LOG_FILE="$LOG_DIR/mpu6050-$(date +%Y%m%d-%H%M%S).log"
+fi
+
+echo "--- build release firmware for ${TARGET} ---"
+env -u RUSTFLAGS cargo build -p mpu6050-esp32c3-bringup --release --target "$TARGET"
+
+if [ "${NO_FLASH:-0}" != "1" ]; then
+  echo "--- flash ${PORT} ---"
+  env -u RUSTFLAGS espflash flash --port "$PORT" "$BIN"
+fi
+
+if [ "${NO_MONITOR:-0}" = "1" ]; then
+  exit 0
+fi
+
+if [ "${NO_LOG:-0}" = "1" ]; then
+  cargo run -p imu-tool -- monitor --port "$PORT" --baud "$BAUD"
+else
+  mkdir -p "$(dirname "$LOG_FILE")"
+  cargo run -p imu-tool -- monitor --port "$PORT" --baud "$BAUD" --out "$LOG_FILE"
+fi

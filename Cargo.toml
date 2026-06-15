@@ -1,0 +1,25 @@
+[workspace]
+default-members = [
+    "tools/imu-tool",
+    "crates/imu-core",
+    "crates/imu-validation",
+]
+members = [
+    "boards/esp32-c3",
+    "tools/imu-tool",
+    "crates/imu-core",
+    "crates/imu-validation",
+]
+resolver = "3"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = "s"
+overflow-checks = false
