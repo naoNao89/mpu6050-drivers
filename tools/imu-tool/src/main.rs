@@ -48,6 +48,8 @@ enum Command {
         baud: u32,
         #[arg(long)]
         out: PathBuf,
+        #[arg(long, value_enum, default_value = "text")]
+        mode: StreamModeArg,
     },
     Monitor {
         #[arg(long)]
@@ -56,6 +58,8 @@ enum Command {
         baud: u32,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "text")]
+        mode: StreamModeArg,
     },
     OrientationCapture {
         #[arg(long)]
@@ -172,6 +176,21 @@ enum ValidationModeArg {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum StreamModeArg {
+    Text,
+    Binary,
+}
+
+impl From<StreamModeArg> for imu_tool::StreamMode {
+    fn from(value: StreamModeArg) -> Self {
+        match value {
+            StreamModeArg::Text => Self::Text,
+            StreamModeArg::Binary => Self::Binary,
+        }
+    }
+}
+
 impl From<ValidationModeArg> for imu_tool::ValidationMode {
     fn from(value: ValidationModeArg) -> Self {
         match value {
@@ -197,8 +216,14 @@ fn main() -> std::process::ExitCode {
             seconds,
             baud,
             out,
-        } => imu_tool::capture(&port, baud, seconds, &out),
-        Command::Monitor { port, baud, out } => imu_tool::monitor(&port, baud, out.as_deref()),
+            mode,
+        } => imu_tool::capture(&port, baud, seconds, &out, mode.into()),
+        Command::Monitor {
+            port,
+            baud,
+            out,
+            mode,
+        } => imu_tool::monitor(&port, baud, out.as_deref(), mode.into()),
         Command::OrientationCapture {
             port,
             seconds,

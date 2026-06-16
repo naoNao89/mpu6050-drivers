@@ -13,6 +13,22 @@ const GYRO: f64 = 131.0;
 const FACES: [&str; 6] = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"];
 type ToolResult = Result<i32, Box<dyn std::error::Error>>;
 
+/// Binary IMU frame format, little-endian:
+/// magic[2]="IM", version u8=1, payload_len u8=32,
+/// payload: address u8, reserved u8, sequence u64, timestamp_us u64,
+/// ax i16, ay i16, az i16, temp i16, gx i16, gy i16, gz i16,
+/// crc16-ccitt over header+payload (not including crc).
+pub const BINARY_FRAME_MAGIC: [u8; 2] = *b"IM";
+pub const BINARY_FRAME_VERSION: u8 = 1;
+pub const BINARY_FRAME_PAYLOAD_LEN: u8 = 32;
+pub const BINARY_FRAME_LEN: usize = 2 + 1 + 1 + BINARY_FRAME_PAYLOAD_LEN as usize + 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamMode {
+    Text,
+    Binary,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationMode {
     Report,
@@ -98,24 +114,58 @@ fn read_serial_for<W: Write>(
     Ok(())
 }
 
-pub fn capture(port: &str, baud: u32, seconds: f64, out: &Path) -> ToolResult {
+fn read_serial_binary_for<W: Write>(
+    ser: &mut dyn serialport::SerialPort,
+    seconds: Option<f64>,
+    out: &mut W,
+) -> io::Result<()> {
+    let deadline = seconds.map(|s| Instant::now() + Duration::from_secs_f64(s.max(0.0)));
+    let mut buf = [0u8; 2048];
+    let mut dec = BinaryFrameDecoder::new();
+    while deadline.is_none_or(|d| Instant::now() < d) {
+        match ser.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                for ev in dec.push(&buf[..n]) {
+                    match ev {
+                        BinaryDecodeEvent::Sample(s) => {
+                            let line = raw_sample_line(&s);
+                            println!("{line}");
+                            writeln!(out, "{line}")?;
+                        }
+                        BinaryDecodeEvent::Warning(w) => eprintln!("binary_frame_warning: {w}"),
+                    }
+                }
+                out.flush()?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+pub fn capture(port: &str, baud: u32, seconds: f64, out: &Path, mode: StreamMode) -> ToolResult {
     write_parent(out)?;
     let mut ser = open_serial(port, baud)?;
     let mut f = fs::File::create(out)?;
     writeln!(
         f,
-        "# capture_start port={port} baud={baud} seconds={seconds}"
+        "# capture_start port={port} baud={baud} seconds={seconds} mode={mode:?}"
     )?;
     println!(
         "capturing real serial data from {port} for {seconds:.1}s -> {}",
         out.display()
     );
-    read_serial_for(&mut *ser, seconds, &mut f, |_| {})?;
+    match mode {
+        StreamMode::Text => read_serial_for(&mut *ser, seconds, &mut f, |_| {})?,
+        StreamMode::Binary => read_serial_binary_for(&mut *ser, Some(seconds), &mut f)?,
+    }
     writeln!(f, "\n# capture_end")?;
     Ok(0)
 }
 
-pub fn monitor(port: &str, baud: u32, out: Option<&Path>) -> ToolResult {
+pub fn monitor(port: &str, baud: u32, out: Option<&Path>, mode: StreamMode) -> ToolResult {
     let mut ser = open_serial(port, baud)?;
     let mut log = if let Some(path) = out {
         write_parent(path)?;
@@ -124,23 +174,32 @@ pub fn monitor(port: &str, baud: u32, out: Option<&Path>) -> ToolResult {
         None
     };
     println!("--- monitoring {port} @{baud}, Ctrl-C to quit ---");
-    let mut buf = [0u8; 2048];
-    loop {
-        match ser.read(&mut buf) {
-            Ok(0) => {}
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&buf[..n]);
-                print!("{text}");
-                io::stdout().flush()?;
-                if let Some(f) = log.as_mut() {
-                    f.write_all(text.as_bytes())?;
-                    f.flush()?;
+    if mode == StreamMode::Binary {
+        if let Some(f) = log.as_mut() {
+            read_serial_binary_for(&mut *ser, None, f)?;
+        } else {
+            read_serial_binary_for(&mut *ser, None, &mut io::sink())?;
+        }
+    } else {
+        let mut buf = [0u8; 2048];
+        loop {
+            match ser.read(&mut buf) {
+                Ok(0) => {}
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    print!("{text}");
+                    io::stdout().flush()?;
+                    if let Some(f) = log.as_mut() {
+                        f.write_all(text.as_bytes())?;
+                        f.flush()?;
+                    }
                 }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(Box::new(e)),
             }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(Box::new(e)),
         }
     }
+    Ok(0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,7 +219,7 @@ pub fn orientation_capture(
     println!("- pause 1-2 seconds on as many different faces as possible");
     println!("- avoid fast shaking; dynamic acceleration will be filtered out");
     if !stop_when_covered {
-        return capture(port, baud, seconds, out);
+        return capture(port, baud, seconds, out, StreamMode::Text);
     }
     write_parent(out)?;
     println!(
@@ -373,7 +432,7 @@ pub fn stationary_suite(
     let min_stationary = std::cmp::max(10, (expected as f64 * 0.60) as usize);
     println!("stationary_suite_run_dir={}", run_dir.display());
     let started = chrono::Local::now().to_rfc3339();
-    let capture_rc = capture(port, baud, seconds, &raw)?;
+    let capture_rc = capture(port, baud, seconds, &raw, StreamMode::Text)?;
     let export_rc = export_csv(&raw, &csv, sample_rate_hz)?;
     let analyze_rc = analyze(
         &raw,
@@ -512,7 +571,7 @@ pub fn sixface_capture(port: &str, baud: u32, seconds_per_face: f64, out: &Path)
     Ok(0)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawSample {
     pub address: i32,
     pub ax: i32,
@@ -543,6 +602,157 @@ impl RawSample {
     pub fn accel_mag_g(&self) -> f64 {
         let a = self.accel_g();
         (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+    }
+}
+
+pub fn raw_sample_line(s: &RawSample) -> String {
+    let timestamp_us = s
+        .timestamp_s
+        .map(|v| (v * 1_000_000.0).round() as u64)
+        .unwrap_or(0);
+    format!(
+        "RAW 0x{:02x}: accel=({}, {}, {}) temp_raw={} gyro=({}, {}, {}) timestamp_us={} sequence={}",
+        s.address,
+        s.ax,
+        s.ay,
+        s.az,
+        s.temp_raw,
+        s.gx,
+        s.gy,
+        s.gz,
+        timestamp_us,
+        s.sequence.unwrap_or(0)
+    )
+}
+
+pub fn crc16_ccitt_false(data: &[u8]) -> u16 {
+    let mut crc = 0xffffu16;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+pub fn encode_binary_frame(s: &RawSample) -> [u8; BINARY_FRAME_LEN] {
+    let mut b = [0u8; BINARY_FRAME_LEN];
+    b[0..2].copy_from_slice(&BINARY_FRAME_MAGIC);
+    b[2] = BINARY_FRAME_VERSION;
+    b[3] = BINARY_FRAME_PAYLOAD_LEN;
+    b[4] = s.address as u8;
+    b[6..14].copy_from_slice(&s.sequence.unwrap_or(0).to_le_bytes());
+    let ts = s
+        .timestamp_s
+        .map(|v| (v * 1_000_000.0).round() as u64)
+        .unwrap_or(0);
+    b[14..22].copy_from_slice(&ts.to_le_bytes());
+    for (off, v) in [
+        (22, s.ax),
+        (24, s.ay),
+        (26, s.az),
+        (28, s.temp_raw),
+        (30, s.gx),
+        (32, s.gy),
+        (34, s.gz),
+    ] {
+        b[off..off + 2].copy_from_slice(&(v as i16).to_le_bytes());
+    }
+    let crc = crc16_ccitt_false(&b[..BINARY_FRAME_LEN - 2]);
+    b[BINARY_FRAME_LEN - 2..].copy_from_slice(&crc.to_le_bytes());
+    b
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BinaryDecodeEvent {
+    Sample(RawSample),
+    Warning(String),
+}
+
+#[derive(Default)]
+pub struct BinaryFrameDecoder {
+    buf: Vec<u8>,
+    last_seq: Option<u64>,
+}
+
+impl BinaryFrameDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<BinaryDecodeEvent> {
+        self.buf.extend_from_slice(bytes);
+        let mut ev = Vec::new();
+        loop {
+            let Some(pos) = self.buf.windows(2).position(|w| w == BINARY_FRAME_MAGIC) else {
+                if !self.buf.is_empty() {
+                    ev.push(BinaryDecodeEvent::Warning(format!(
+                        "discarded {} byte(s) before magic",
+                        self.buf.len()
+                    )));
+                    self.buf.clear();
+                }
+                break;
+            };
+            if pos > 0 {
+                self.buf.drain(..pos);
+                ev.push(BinaryDecodeEvent::Warning(format!(
+                    "discarded {pos} byte(s) before magic"
+                )));
+            }
+            if self.buf.len() < BINARY_FRAME_LEN {
+                break;
+            }
+            if self.buf[2] != BINARY_FRAME_VERSION || self.buf[3] != BINARY_FRAME_PAYLOAD_LEN {
+                ev.push(BinaryDecodeEvent::Warning(format!(
+                    "bad header version={} length={}",
+                    self.buf[2], self.buf[3]
+                )));
+                self.buf.drain(..1);
+                continue;
+            }
+            let got = u16::from_le_bytes([
+                self.buf[BINARY_FRAME_LEN - 2],
+                self.buf[BINARY_FRAME_LEN - 1],
+            ]);
+            let want = crc16_ccitt_false(&self.buf[..BINARY_FRAME_LEN - 2]);
+            if got != want {
+                ev.push(BinaryDecodeEvent::Warning(format!(
+                    "crc mismatch got=0x{got:04x} expected=0x{want:04x}"
+                )));
+                self.buf.drain(..1);
+                continue;
+            }
+            let seq = u64::from_le_bytes(self.buf[6..14].try_into().unwrap());
+            if let Some(prev) = self.last_seq
+                && seq != prev.wrapping_add(1)
+            {
+                ev.push(BinaryDecodeEvent::Warning(format!(
+                    "sequence gap previous={prev} current={seq}"
+                )));
+            }
+            self.last_seq = Some(seq);
+            let i16le = |o| i16::from_le_bytes([self.buf[o], self.buf[o + 1]]) as i32;
+            let ts = u64::from_le_bytes(self.buf[14..22].try_into().unwrap());
+            ev.push(BinaryDecodeEvent::Sample(RawSample {
+                address: self.buf[4] as i32,
+                ax: i16le(22),
+                ay: i16le(24),
+                az: i16le(26),
+                temp_raw: i16le(28),
+                gx: i16le(30),
+                gy: i16le(32),
+                gz: i16le(34),
+                timestamp_s: Some(ts as f64 / 1_000_000.0),
+                sequence: Some(seq),
+            }));
+            self.buf.drain(..BINARY_FRAME_LEN);
+        }
+        ev
     }
 }
 fn raw_re() -> Regex {
@@ -1230,6 +1440,73 @@ mod tests {
         assert_eq!(s.gx, 5);
         assert_eq!(s.timestamp_s, None);
         assert_eq!(s.sequence, None);
+    }
+
+    #[test]
+    fn binary_frame_round_trips_raw_sample() {
+        let s = RawSample {
+            address: 0x68,
+            ax: 1,
+            ay: -2,
+            az: 16384,
+            temp_raw: 99,
+            gx: -4,
+            gy: 5,
+            gz: -6,
+            timestamp_s: Some(1.25),
+            sequence: Some(7),
+        };
+        let mut d = BinaryFrameDecoder::new();
+        let ev = d.push(&encode_binary_frame(&s));
+        assert_eq!(ev, vec![BinaryDecodeEvent::Sample(s)]);
+    }
+
+    #[test]
+    fn binary_decoder_reports_crc_corruption_and_resyncs() {
+        let s = RawSample {
+            address: 0x68,
+            ax: 1,
+            ay: 2,
+            az: 3,
+            temp_raw: 4,
+            gx: 5,
+            gy: 6,
+            gz: 7,
+            timestamp_s: Some(0.001),
+            sequence: Some(0),
+        };
+        let mut bad = encode_binary_frame(&s);
+        bad[22] ^= 0x55;
+        let good = encode_binary_frame(&s);
+        let mut bytes = Vec::from(b"junk".as_slice());
+        bytes.extend_from_slice(&bad);
+        bytes.extend_from_slice(&good);
+        let ev = BinaryFrameDecoder::new().push(&bytes);
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Warning(w) if w.contains("discarded")))
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Warning(w) if w.contains("crc mismatch")))
+        );
+        assert!(ev.iter().any(|e| matches!(e, BinaryDecodeEvent::Sample(_))));
+    }
+
+    #[test]
+    fn binary_decoder_reports_sequence_gap() {
+        let mut d = BinaryFrameDecoder::new();
+        let a = sample_with_timing(Some(0.0), Some(1));
+        let b = sample_with_timing(Some(0.1), Some(3));
+        assert!(matches!(
+            d.push(&encode_binary_frame(&a)).as_slice(),
+            [BinaryDecodeEvent::Sample(_)]
+        ));
+        let ev = d.push(&encode_binary_frame(&b));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Warning(w) if w.contains("sequence gap")))
+        );
     }
 
     #[test]
