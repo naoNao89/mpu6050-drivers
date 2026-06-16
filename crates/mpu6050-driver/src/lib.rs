@@ -134,6 +134,28 @@ impl RawAccelGyroTemp {
     pub fn temp_degrees_c(self) -> f64 {
         self.temp as f64 / TEMP_LSB_PER_DEG_C + TEMP_OFFSET_DEG_C
     }
+
+    pub const fn is_suspicious(self) -> bool {
+        contains_i16_sentinel(self.accel)
+            || contains_i16_sentinel(self.gyro)
+            || self.temp == i16::MIN
+            || self.temp == i16::MAX
+            || all_minus_one(self.accel)
+            || all_minus_one(self.gyro)
+    }
+}
+
+const fn contains_i16_sentinel(values: [i16; 3]) -> bool {
+    values[0] == i16::MIN
+        || values[0] == i16::MAX
+        || values[1] == i16::MIN
+        || values[1] == i16::MAX
+        || values[2] == i16::MIN
+        || values[2] == i16::MAX
+}
+
+const fn all_minus_one(values: [i16; 3]) -> bool {
+    values[0] == -1 && values[1] == -1 && values[2] == -1
 }
 
 pub fn raw_to_imu_sample(raw: RawAccelGyroTemp) -> ImuSample {
