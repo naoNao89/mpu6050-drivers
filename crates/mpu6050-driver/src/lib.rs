@@ -1,0 +1,176 @@
+#![no_std]
+
+use embedded_hal::i2c::I2c;
+use imu_core::ImuSample;
+
+/// MPU6050 I2C address selected by the AD0 pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Address {
+    Ad0Low = 0x68,
+    Ad0High = 0x69,
+}
+
+impl Address {
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+pub mod registers {
+    pub const SMPLRT_DIV: u8 = 0x19;
+    pub const CONFIG: u8 = 0x1A;
+    pub const GYRO_CONFIG: u8 = 0x1B;
+    pub const ACCEL_CONFIG: u8 = 0x1C;
+    pub const FIFO_EN: u8 = 0x23;
+    pub const INT_ENABLE: u8 = 0x38;
+    pub const INT_STATUS: u8 = 0x3A;
+    pub const ACCEL_XOUT_H: u8 = 0x3B;
+    pub const ACCEL_XOUT_L: u8 = 0x3C;
+    pub const ACCEL_YOUT_H: u8 = 0x3D;
+    pub const ACCEL_YOUT_L: u8 = 0x3E;
+    pub const ACCEL_ZOUT_H: u8 = 0x3F;
+    pub const ACCEL_ZOUT_L: u8 = 0x40;
+    pub const TEMP_OUT_H: u8 = 0x41;
+    pub const TEMP_OUT_L: u8 = 0x42;
+    pub const GYRO_XOUT_H: u8 = 0x43;
+    pub const GYRO_XOUT_L: u8 = 0x44;
+    pub const GYRO_YOUT_H: u8 = 0x45;
+    pub const GYRO_YOUT_L: u8 = 0x46;
+    pub const GYRO_ZOUT_H: u8 = 0x47;
+    pub const GYRO_ZOUT_L: u8 = 0x48;
+    pub const USER_CTRL: u8 = 0x6A;
+    pub const PWR_MGMT_1: u8 = 0x6B;
+    pub const FIFO_COUNTH: u8 = 0x72;
+    pub const FIFO_COUNTL: u8 = 0x73;
+    pub const FIFO_R_W: u8 = 0x74;
+    pub const WHO_AM_I: u8 = 0x75;
+}
+
+pub const ACCEL_LSB_PER_G_2G: f64 = 16_384.0;
+pub const GYRO_LSB_PER_DPS_250DPS: f64 = 131.0;
+pub const TEMP_LSB_PER_DEG_C: f64 = 340.0;
+pub const TEMP_OFFSET_DEG_C: f64 = 36.53;
+
+/// Raw accel/temp/gyro register block read from ACCEL_XOUT_H.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawAccelGyroTemp {
+    pub accel: [i16; 3],
+    pub temp: i16,
+    pub gyro: [i16; 3],
+}
+
+impl RawAccelGyroTemp {
+    pub const fn new(accel: [i16; 3], temp: i16, gyro: [i16; 3]) -> Self {
+        Self { accel, temp, gyro }
+    }
+
+    pub fn to_imu_sample(self) -> ImuSample {
+        raw_to_imu_sample(self)
+    }
+
+    pub fn temp_degrees_c(self) -> f64 {
+        self.temp as f64 / TEMP_LSB_PER_DEG_C + TEMP_OFFSET_DEG_C
+    }
+}
+
+pub fn raw_to_imu_sample(raw: RawAccelGyroTemp) -> ImuSample {
+    ImuSample::from_g_dps(
+        raw.accel.map(|v| v as f64 / ACCEL_LSB_PER_G_2G),
+        raw.gyro.map(|v| v as f64 / GYRO_LSB_PER_DPS_250DPS),
+    )
+}
+
+pub struct Mpu6050<I2C> {
+    i2c: I2C,
+    address: Address,
+}
+
+impl<I2C> Mpu6050<I2C> {
+    pub const fn new(i2c: I2C, address: Address) -> Self {
+        Self { i2c, address }
+    }
+
+    pub fn release(self) -> I2C {
+        self.i2c
+    }
+}
+
+impl<I2C> Mpu6050<I2C>
+where
+    I2C: I2c,
+{
+    pub fn wake(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::PWR_MGMT_1, 0x00)
+    }
+
+    pub fn who_am_i(&mut self) -> Result<u8, I2C::Error> {
+        self.read_register(registers::WHO_AM_I)
+    }
+
+    pub fn read_raw_accel_gyro_temp(&mut self) -> Result<RawAccelGyroTemp, I2C::Error> {
+        let mut bytes = [0_u8; 14];
+        self.i2c
+            .write_read(self.address.as_u8(), &[registers::ACCEL_XOUT_H], &mut bytes)?;
+        Ok(RawAccelGyroTemp {
+            accel: [
+                be_i16(bytes[0], bytes[1]),
+                be_i16(bytes[2], bytes[3]),
+                be_i16(bytes[4], bytes[5]),
+            ],
+            temp: be_i16(bytes[6], bytes[7]),
+            gyro: [
+                be_i16(bytes[8], bytes[9]),
+                be_i16(bytes[10], bytes[11]),
+                be_i16(bytes[12], bytes[13]),
+            ],
+        })
+    }
+
+    fn read_register(&mut self, register: u8) -> Result<u8, I2C::Error> {
+        let mut value = [0_u8];
+        self.i2c
+            .write_read(self.address.as_u8(), &[register], &mut value)?;
+        Ok(value[0])
+    }
+
+    fn write_register(&mut self, register: u8, value: u8) -> Result<(), I2C::Error> {
+        self.i2c.write(self.address.as_u8(), &[register, value])
+    }
+}
+
+const fn be_i16(msb: u8, lsb: u8) -> i16 {
+    i16::from_be_bytes([msb, lsb])
+}
+
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_values_match_ad0_pin_state() {
+        assert_eq!(Address::Ad0Low.as_u8(), 0x68);
+        assert_eq!(Address::Ad0High.as_u8(), 0x69);
+    }
+
+    #[test]
+    fn raw_values_convert_to_default_accel_and_gyro_units() {
+        let raw = RawAccelGyroTemp::new([16_384, -16_384, 8_192], 0, [131, -131, 65]);
+        let sample = raw.to_imu_sample();
+        assert_eq!(sample.accel_g, [1.0, -1.0, 0.5]);
+        assert_eq!(sample.gyro_dps[0], 1.0);
+        assert_eq!(sample.gyro_dps[1], -1.0);
+        assert!((sample.gyro_dps[2] - (65.0 / 131.0)).abs() < f64::EPSILON);
+        assert_eq!(sample.timestamp_s, None);
+        assert_eq!(sample.sequence, None);
+    }
+
+    #[test]
+    fn raw_temperature_converts_to_degrees_celsius() {
+        let raw = RawAccelGyroTemp::new([0; 3], 340, [0; 3]);
+        assert!((raw.temp_degrees_c() - 37.53).abs() < f64::EPSILON);
+    }
+}
