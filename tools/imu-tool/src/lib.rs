@@ -738,15 +738,38 @@ impl BinaryFrameDecoder {
             self.last_seq = Some(seq);
             let i16le = |o| i16::from_le_bytes([self.buf[o], self.buf[o + 1]]) as i32;
             let ts = u64::from_le_bytes(self.buf[14..22].try_into().unwrap());
+            let address = self.buf[4] as i32;
+            let ax = i16le(22);
+            let ay = i16le(24);
+            let az = i16le(26);
+            let temp_raw = i16le(28);
+            let gx = i16le(30);
+            let gy = i16le(32);
+            let gz = i16le(34);
+            let gyro_all_minus_one = gx == -1 && gy == -1 && gz == -1;
+            let has_sentinel = [ax, ay, az, temp_raw, gx, gy, gz]
+                .iter()
+                .any(|v| *v == i16::MAX as i32 || *v == i16::MIN as i32);
+            if gyro_all_minus_one || has_sentinel {
+                let reason = match (gyro_all_minus_one, has_sentinel) {
+                    (true, true) => "gyro all -1; sentinel i16 min/max field",
+                    (true, false) => "gyro all -1",
+                    (false, true) => "sentinel i16 min/max field",
+                    (false, false) => unreachable!(),
+                };
+                ev.push(BinaryDecodeEvent::Warning(format!(
+                    "suspicious sample address=0x{address:02x} sequence={seq}: {reason}"
+                )));
+            }
             ev.push(BinaryDecodeEvent::Sample(RawSample {
-                address: self.buf[4] as i32,
-                ax: i16le(22),
-                ay: i16le(24),
-                az: i16le(26),
-                temp_raw: i16le(28),
-                gx: i16le(30),
-                gy: i16le(32),
-                gz: i16le(34),
+                address,
+                ax,
+                ay,
+                az,
+                temp_raw,
+                gx,
+                gy,
+                gz,
                 timestamp_s: Some(ts as f64 / 1_000_000.0),
                 sequence: Some(seq),
             }));
@@ -1459,6 +1482,68 @@ mod tests {
         let mut d = BinaryFrameDecoder::new();
         let ev = d.push(&encode_binary_frame(&s));
         assert_eq!(ev, vec![BinaryDecodeEvent::Sample(s)]);
+    }
+
+    #[test]
+    fn regression_binary_decoder_warns_on_crc_valid_gyro_all_minus_one() {
+        let s = RawSample {
+            address: 0x68,
+            ax: 1,
+            ay: 2,
+            az: 3,
+            temp_raw: 25,
+            gx: -1,
+            gy: -1,
+            gz: -1,
+            timestamp_s: Some(0.001),
+            sequence: Some(42),
+        };
+        let ev = BinaryFrameDecoder::new().push(&encode_binary_frame(&s));
+        assert!(
+            ev.iter().any(|e| matches!(
+                e,
+                BinaryDecodeEvent::Warning(w)
+                    if w.contains("suspicious")
+                        && w.contains("address=0x68")
+                        && w.contains("sequence=42")
+            )),
+            "expected suspicious warning with address and sequence, got {ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Sample(sample) if sample == &s))
+        );
+    }
+
+    #[test]
+    fn regression_binary_decoder_warns_on_crc_valid_i16_sentinel_field() {
+        let s = RawSample {
+            address: 0x69,
+            ax: i16::MAX as i32,
+            ay: 2,
+            az: 3,
+            temp_raw: 25,
+            gx: 4,
+            gy: i16::MIN as i32,
+            gz: 6,
+            timestamp_s: Some(0.002),
+            sequence: Some(43),
+        };
+        let ev = BinaryFrameDecoder::new().push(&encode_binary_frame(&s));
+        assert!(
+            ev.iter().any(|e| matches!(
+                e,
+                BinaryDecodeEvent::Warning(w)
+                    if w.contains("suspicious")
+                        && w.contains("address=0x69")
+                        && w.contains("sequence=43")
+            )),
+            "expected suspicious warning with address and sequence, got {ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Sample(sample) if sample == &s))
+        );
     }
 
     #[test]
