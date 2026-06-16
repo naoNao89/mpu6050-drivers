@@ -264,7 +264,7 @@ fn main() -> ! {
     );
     let mut raw_sequence: u64 = 0;
     loop {
-        read_motion_sample(&mut mpu, MPU_ADDR_AD0_LOW, &mut raw_sequence);
+        read_motion_sample_retry_once(&mut mpu, MPU_ADDR_AD0_LOW, &mut raw_sequence);
         delay.delay_millis(RAW_STREAM_PERIOD_MS);
     }
 }
