@@ -1462,6 +1462,68 @@ mod tests {
     }
 
     #[test]
+    fn regression_binary_decoder_warns_on_crc_valid_gyro_all_minus_one() {
+        let s = RawSample {
+            address: 0x68,
+            ax: 1,
+            ay: 2,
+            az: 3,
+            temp_raw: 25,
+            gx: -1,
+            gy: -1,
+            gz: -1,
+            timestamp_s: Some(0.001),
+            sequence: Some(42),
+        };
+        let ev = BinaryFrameDecoder::new().push(&encode_binary_frame(&s));
+        assert!(
+            ev.iter().any(|e| matches!(
+                e,
+                BinaryDecodeEvent::Warning(w)
+                    if w.contains("suspicious")
+                        && w.contains("address=0x68")
+                        && w.contains("sequence=42")
+            )),
+            "expected suspicious warning with address and sequence, got {ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Sample(sample) if sample == &s))
+        );
+    }
+
+    #[test]
+    fn regression_binary_decoder_warns_on_crc_valid_i16_sentinel_field() {
+        let s = RawSample {
+            address: 0x69,
+            ax: i16::MAX as i32,
+            ay: 2,
+            az: 3,
+            temp_raw: 25,
+            gx: 4,
+            gy: i16::MIN as i32,
+            gz: 6,
+            timestamp_s: Some(0.002),
+            sequence: Some(43),
+        };
+        let ev = BinaryFrameDecoder::new().push(&encode_binary_frame(&s));
+        assert!(
+            ev.iter().any(|e| matches!(
+                e,
+                BinaryDecodeEvent::Warning(w)
+                    if w.contains("suspicious")
+                        && w.contains("address=0x69")
+                        && w.contains("sequence=43")
+            )),
+            "expected suspicious warning with address and sequence, got {ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, BinaryDecodeEvent::Sample(sample) if sample == &s))
+        );
+    }
+
+    #[test]
     fn binary_decoder_reports_crc_corruption_and_resyncs() {
         let s = RawSample {
             address: 0x68,
