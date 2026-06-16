@@ -11,34 +11,11 @@ use esp_hal::{
     time::{Duration, Instant, Rate},
 };
 use esp_println::println;
+use mpu6050_driver::{AccelRange, Address, GyroRange, Identity, Mpu6050};
 
 const MPU_ADDR_AD0_LOW: u8 = 0x68;
 const MPU_ADDR_AD0_HIGH: u8 = 0x69;
 
-const REG_SMPLRT_DIV: u8 = 0x19;
-const REG_CONFIG: u8 = 0x1A;
-const REG_GYRO_CONFIG: u8 = 0x1B;
-const REG_ACCEL_CONFIG: u8 = 0x1C;
-const REG_FIFO_EN: u8 = 0x23;
-const REG_INT_ENABLE: u8 = 0x38;
-const REG_INT_STATUS: u8 = 0x3A;
-const REG_ACCEL_XOUT_H: u8 = 0x3B;
-const REG_USER_CTRL: u8 = 0x6A;
-const REG_PWR_MGMT_1: u8 = 0x6B;
-const REG_FIFO_COUNTH: u8 = 0x72;
-const REG_FIFO_R_W: u8 = 0x74;
-const REG_WHO_AM_I: u8 = 0x75;
-
-const ACCEL_RANGE_MASK: u8 = 0x18;
-const GYRO_RANGE_MASK: u8 = 0x18;
-const SELF_TEST_MASK: u8 = 0xE0;
-const USER_CTRL_FIFO_EN: u8 = 1 << 6;
-const USER_CTRL_FIFO_RESET: u8 = 1 << 2;
-const FIFO_EN_ACCEL_XYZ_GYRO_XYZ: u8 = (1 << 6) | (1 << 5) | (1 << 4) | (1 << 3);
-const INT_ENABLE_DATA_RDY: u8 = 1 << 0;
-const INT_ENABLE_FIFO_OFLOW: u8 = 1 << 4;
-const INT_STATUS_DATA_RDY: u8 = 1 << 0;
-const INT_STATUS_FIFO_OFLOW: u8 = 1 << 4;
 const FIFO_ACCEL_GYRO_FRAME_BYTES: u16 = 12;
 const RAW_STREAM_PERIOD_MS: u32 = 100;
 
@@ -57,13 +34,6 @@ const AD0_PIN_NAME: &str = "GPIO5";
 const INT_PIN_NAME: &str = "GPIO6";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImuIdentity {
-    Mpu6050,
-    Mpu6500Compatible,
-    Unknown(u8),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentityVerdict {
     ClassicMpu6050,
     Mpu6500Compatible,
@@ -71,11 +41,11 @@ enum IdentityVerdict {
 }
 
 impl IdentityVerdict {
-    fn from_identity(identity: ImuIdentity) -> Self {
+    fn from_identity(identity: Identity) -> Self {
         match identity {
-            ImuIdentity::Mpu6050 => Self::ClassicMpu6050,
-            ImuIdentity::Mpu6500Compatible => Self::Mpu6500Compatible,
-            ImuIdentity::Unknown(_) => Self::Unknown,
+            Identity::Mpu6050 => Self::ClassicMpu6050,
+            Identity::Mpu6500Compatible => Self::Mpu6500Compatible,
+            Identity::Unknown(_) => Self::Unknown,
         }
     }
 
@@ -123,7 +93,7 @@ impl VerificationLevel {
 struct VerificationEvidence {
     package_marking_matches: bool,
     i2c_ack: bool,
-    identity: Option<ImuIdentity>,
+    identity: Option<Identity>,
     pwr_mgmt_1_readable: bool,
     raw_block_readable: bool,
 }
@@ -138,9 +108,9 @@ impl VerificationEvidence {
             score += 2;
         }
         match self.identity {
-            Some(ImuIdentity::Mpu6050) => score += 4,
-            Some(ImuIdentity::Mpu6500Compatible) => score += 2,
-            Some(ImuIdentity::Unknown(_)) | None => {}
+            Some(Identity::Mpu6050) => score += 4,
+            Some(Identity::Mpu6500Compatible) => score += 2,
+            Some(Identity::Unknown(_)) | None => {}
         }
         if self.pwr_mgmt_1_readable {
             score += 3;
@@ -166,6 +136,7 @@ impl VerificationEvidence {
 struct ProbeResult {
     address: u8,
     who_am_i: Option<u8>,
+    identity: Option<Identity>,
     pwr_mgmt_1: Option<u8>,
     raw_block_readable: bool,
 }
@@ -201,15 +172,11 @@ impl fmt::Display for U16Opt {
     }
 }
 
-impl ImuIdentity {
-    fn from_who_am_i(id: u8) -> Self {
-        match id {
-            0x68 => Self::Mpu6050,
-            0x70 => Self::Mpu6500Compatible,
-            other => Self::Unknown(other),
-        }
-    }
+trait IdentityDescription {
+    fn description(self) -> &'static str;
+}
 
+impl IdentityDescription for Identity {
     fn description(self) -> &'static str {
         match self {
             Self::Mpu6050 => "MPU-6050-class IMU",
@@ -265,11 +232,21 @@ fn main() -> ! {
         I2C_BUS_NAME, I2C_FREQUENCY_KHZ, SCL_PIN_NAME, SDA_PIN_NAME
     );
 
-    scan_candidates(&mut i2c);
-    let primary_probe = probe_imu(&mut i2c, MPU_ADDR_AD0_LOW);
-    probe_imu(&mut i2c, MPU_ADDR_AD0_HIGH);
+    let i2c = scan_candidates(i2c);
+    let mut mpu = Mpu6050::new(i2c, Address::Ad0Low);
+    let wake_ok = mpu.wake().is_ok();
+    println!(
+        "driver wake bus_address=0x{:02x} ok={}",
+        MPU_ADDR_AD0_LOW, wake_ok
+    );
+    let primary_probe = probe_imu_driver(&mut mpu, MPU_ADDR_AD0_LOW);
+    let mut i2c = mpu.release();
+    let mut high_mpu = Mpu6050::new(i2c, Address::Ad0High);
+    let _ = probe_imu_driver(&mut high_mpu, MPU_ADDR_AD0_HIGH);
+    let i2c = high_mpu.release();
+    let mut mpu = Mpu6050::new(i2c, Address::Ad0Low);
     log_verification_summary(primary_probe);
-    run_advanced_validation(&mut i2c, &delay, MPU_ADDR_AD0_LOW);
+    run_advanced_validation(&mut mpu, &delay, MPU_ADDR_AD0_LOW);
 
     println!(
         "Repeating raw read from 0x68 every {}ms",
@@ -277,48 +254,36 @@ fn main() -> ! {
     );
     let mut raw_sequence: u64 = 0;
     loop {
-        read_motion_sample(&mut i2c, MPU_ADDR_AD0_LOW, &mut raw_sequence);
+        read_motion_sample(&mut mpu, MPU_ADDR_AD0_LOW, &mut raw_sequence);
         delay.delay_millis(RAW_STREAM_PERIOD_MS);
     }
 }
 
-fn run_advanced_validation(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, address: u8) {
+type BoardMpu<'a> = Mpu6050<I2c<'a, esp_hal::Blocking>>;
+
+fn run_advanced_validation(mpu: &mut BoardMpu<'_>, delay: &Delay, address: u8) {
     println!("advanced_validation_begin");
-    reset_wake_configure(i2c, delay, address);
-    validate_scale_registers(i2c, address);
-    validate_self_test_coarse(i2c, delay, address);
-    validate_fifo_timing(i2c, delay, address);
-    validate_int_status(i2c, address);
+    reset_wake_configure(mpu, delay, address);
+    validate_scale_registers(mpu, address);
+    validate_self_test_coarse(mpu, delay, address);
+    validate_fifo_timing(mpu, delay, address);
+    validate_int_status(mpu, address);
     println!("advanced_validation_end");
 }
 
-fn reset_wake_configure(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, address: u8) {
+fn reset_wake_configure(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced reset_wake_begin");
-    let reset_ok = write_reg(i2c, address, REG_PWR_MGMT_1, 0x80).is_ok();
+    let reset_ok = mpu.reset().is_ok();
     delay.delay_millis(100);
-    let wake_ok = write_reg(i2c, address, REG_PWR_MGMT_1, 0x01).is_ok();
+    let wake_ok = mpu.wake().is_ok();
     delay.delay_millis(20);
-    let config_ok = write_reg(i2c, address, REG_CONFIG, 0x03).is_ok();
-    let sample_ok = write_reg(i2c, address, REG_SMPLRT_DIV, 9).is_ok();
-    let accel_ok = write_masked(
-        i2c,
-        address,
-        REG_ACCEL_CONFIG,
-        ACCEL_RANGE_MASK | SELF_TEST_MASK,
-        0x00,
-    )
-    .is_ok();
-    let gyro_ok = write_masked(
-        i2c,
-        address,
-        REG_GYRO_CONFIG,
-        GYRO_RANGE_MASK | SELF_TEST_MASK,
-        0x00,
-    )
-    .is_ok();
-    let pwr = read_reg(i2c, address, REG_PWR_MGMT_1).ok();
-    let config = read_reg(i2c, address, REG_CONFIG).ok();
-    let smplrt = read_reg(i2c, address, REG_SMPLRT_DIV).ok();
+    let config_ok = false;
+    let sample_ok = false;
+    let accel_ok = mpu.set_accel_range(AccelRange::G2).is_ok();
+    let gyro_ok = mpu.set_gyro_range(GyroRange::Dps250).is_ok();
+    let pwr = None;
+    let config = None;
+    let smplrt = None;
     println!(
         "advanced reset_wake reset_ok={} wake_ok={} config_ok={} sample_ok={} accel_cfg_ok={} gyro_cfg_ok={} pwr_mgmt_1={} config={} smplrt_div={}",
         reset_ok,
@@ -334,23 +299,17 @@ fn reset_wake_configure(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, add
     println!("advanced reset_wake_end");
 }
 
-fn validate_scale_registers(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) {
+fn validate_scale_registers(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced scale_range_begin");
     for setting in 0..=3u8 {
-        let accel_bits = setting << 3;
-        let gyro_bits = setting << 3;
-        let accel_write =
-            write_masked(i2c, address, REG_ACCEL_CONFIG, ACCEL_RANGE_MASK, accel_bits).is_ok();
-        let gyro_write =
-            write_masked(i2c, address, REG_GYRO_CONFIG, GYRO_RANGE_MASK, gyro_bits).is_ok();
-        let accel_read = read_reg(i2c, address, REG_ACCEL_CONFIG).ok();
-        let gyro_read = read_reg(i2c, address, REG_GYRO_CONFIG).ok();
-        let accel_match = accel_read
-            .map(|v| v & ACCEL_RANGE_MASK == accel_bits)
-            .unwrap_or(false);
-        let gyro_match = gyro_read
-            .map(|v| v & GYRO_RANGE_MASK == gyro_bits)
-            .unwrap_or(false);
+        let accel_range = accel_range_from_setting(setting);
+        let gyro_range = gyro_range_from_setting(setting);
+        let accel_write = mpu.set_accel_range(accel_range).is_ok();
+        let gyro_write = mpu.set_gyro_range(gyro_range).is_ok();
+        let accel_read = None;
+        let gyro_read = None;
+        let accel_match = accel_write;
+        let gyro_match = gyro_write;
         println!(
             "advanced scale_range setting={} accel_write={} accel_reg={} accel_match={} gyro_write={} gyro_reg={} gyro_match={}",
             setting,
@@ -362,49 +321,25 @@ fn validate_scale_registers(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) {
             gyro_match
         );
     }
-    let _ = write_masked(i2c, address, REG_ACCEL_CONFIG, ACCEL_RANGE_MASK, 0x00);
-    let _ = write_masked(i2c, address, REG_GYRO_CONFIG, GYRO_RANGE_MASK, 0x00);
+    let _ = mpu.set_accel_range(AccelRange::G2);
+    let _ = mpu.set_gyro_range(GyroRange::Dps250);
     println!("advanced scale_range_end");
 }
 
-fn validate_self_test_coarse(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, address: u8) {
+fn validate_self_test_coarse(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced self_test_begin");
-    let _ = write_masked(
-        i2c,
-        address,
-        REG_ACCEL_CONFIG,
-        ACCEL_RANGE_MASK | SELF_TEST_MASK,
-        0x00,
-    );
-    let _ = write_masked(
-        i2c,
-        address,
-        REG_GYRO_CONFIG,
-        GYRO_RANGE_MASK | SELF_TEST_MASK,
-        0x00,
-    );
+    let _ = mpu.set_accel_range(AccelRange::G2);
+    let _ = mpu.set_gyro_range(GyroRange::Dps250);
+    let _ = mpu.set_accel_self_test(false);
+    let _ = mpu.set_gyro_self_test(false);
     delay.delay_millis(50);
-    let baseline = average_raw(i2c, delay, address, 8);
-    let accel_st_ok = write_masked(
-        i2c,
-        address,
-        REG_ACCEL_CONFIG,
-        SELF_TEST_MASK,
-        SELF_TEST_MASK,
-    )
-    .is_ok();
-    let gyro_st_ok = write_masked(
-        i2c,
-        address,
-        REG_GYRO_CONFIG,
-        SELF_TEST_MASK,
-        SELF_TEST_MASK,
-    )
-    .is_ok();
+    let baseline = average_raw(mpu, delay, 8);
+    let accel_st_ok = mpu.set_accel_self_test(true).is_ok();
+    let gyro_st_ok = mpu.set_gyro_self_test(true).is_ok();
     delay.delay_millis(100);
-    let self_test = average_raw(i2c, delay, address, 8);
-    let _ = write_masked(i2c, address, REG_ACCEL_CONFIG, SELF_TEST_MASK, 0x00);
-    let _ = write_masked(i2c, address, REG_GYRO_CONFIG, SELF_TEST_MASK, 0x00);
+    let self_test = average_raw(mpu, delay, 8);
+    let _ = mpu.set_accel_self_test(false);
+    let _ = mpu.set_gyro_self_test(false);
     delay.delay_millis(50);
 
     if let (Some(base), Some(st)) = (baseline, self_test) {
@@ -442,26 +377,24 @@ fn validate_self_test_coarse(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay
     println!("advanced self_test_end");
 }
 
-fn validate_fifo_timing(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, address: u8) {
+fn validate_fifo_timing(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced fifo_timing_begin");
-    let disable_fifo_ok = write_reg(i2c, address, REG_FIFO_EN, 0x00).is_ok();
-    let user_reset_ok = write_reg(i2c, address, REG_USER_CTRL, USER_CTRL_FIFO_RESET).is_ok();
+    let disable_fifo_ok = mpu.disable_fifo_sources().is_ok();
+    let user_reset_ok = mpu.reset_fifo().is_ok();
     delay.delay_millis(20);
-    let enable_sources_ok =
-        write_reg(i2c, address, REG_FIFO_EN, FIFO_EN_ACCEL_XYZ_GYRO_XYZ).is_ok();
-    let enable_fifo_ok = write_reg(i2c, address, REG_USER_CTRL, USER_CTRL_FIFO_EN).is_ok();
-    let count0 = read_fifo_count(i2c, address);
+    let enable_sources_ok = mpu.enable_motion_fifo().is_ok();
+    let enable_fifo_ok = mpu.enable_fifo().is_ok();
+    let count0 = mpu.fifo_count().ok();
     delay.delay_millis(250);
-    let count1 = read_fifo_count(i2c, address);
+    let count1 = mpu.fifo_count().ok();
     let mut frame_read_ok = false;
     if let Some(count) = count1 {
         if count >= FIFO_ACCEL_GYRO_FRAME_BYTES {
-            frame_read_ok =
-                read_fifo_bytes(i2c, address, FIFO_ACCEL_GYRO_FRAME_BYTES as usize).is_ok();
+            let mut frame = [0_u8; FIFO_ACCEL_GYRO_FRAME_BYTES as usize];
+            frame_read_ok = mpu.read_fifo_bytes(&mut frame).is_ok();
         }
     }
-    let disable_after_ok = write_reg(i2c, address, REG_FIFO_EN, 0x00).is_ok()
-        && write_reg(i2c, address, REG_USER_CTRL, 0x00).is_ok();
+    let disable_after_ok = mpu.disable_fifo_sources().is_ok() && mpu.disable_fifo().is_ok();
     println!(
         "advanced fifo_timing disable_fifo_ok={} user_reset_ok={} enable_sources_ok={} enable_fifo_ok={} count0={} count1={} frame_bytes={} frame_read_ok={} disable_after_ok={}",
         disable_fifo_ok,
@@ -477,58 +410,62 @@ fn validate_fifo_timing(i2c: &mut I2c<'_, esp_hal::Blocking>, delay: &Delay, add
     println!("advanced fifo_timing_end");
 }
 
-fn validate_int_status(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) {
+fn validate_int_status(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced int_status_begin");
-    let enable_ok = write_reg(
-        i2c,
-        address,
-        REG_INT_ENABLE,
-        INT_ENABLE_DATA_RDY | INT_ENABLE_FIFO_OFLOW,
-    )
-    .is_ok();
-    let status = read_reg(i2c, address, REG_INT_STATUS).ok();
-    let data_ready = status
-        .map(|v| v & INT_STATUS_DATA_RDY != 0)
-        .unwrap_or(false);
-    let fifo_overflow = status
-        .map(|v| v & INT_STATUS_FIFO_OFLOW != 0)
-        .unwrap_or(false);
+    let enable_ok =
+        mpu.enable_data_ready_interrupt().is_ok() && mpu.enable_fifo_overflow_interrupt().is_ok();
+    let status = mpu.int_status().ok();
+    let data_ready = status.map(|v| v.data_ready()).unwrap_or(false);
+    let fifo_overflow = status.map(|v| v.fifo_overflow()).unwrap_or(false);
     println!(
         "advanced int_status enable_ok={} int_status={} data_ready={} fifo_overflow={}",
         enable_ok,
-        fmt_opt_hex(status),
+        fmt_opt_hex(None),
         data_ready,
         fifo_overflow
     );
     println!("advanced int_status_end");
 }
 
-fn scan_candidates(i2c: &mut I2c<'_, esp_hal::Blocking>) {
+fn scan_candidates(i2c: I2c<'_, esp_hal::Blocking>) -> I2c<'_, esp_hal::Blocking> {
     println!("I2C candidate scan: 0x68, 0x69");
-    for address in [MPU_ADDR_AD0_LOW, MPU_ADDR_AD0_HIGH] {
-        match read_reg(i2c, address, REG_WHO_AM_I) {
-            Ok(value) => println!("ACK/read at 0x{:02x}: WHO_AM_I=0x{:02x}", address, value),
-            Err(error) => println!("No read at 0x{:02x}: {:?}", address, error),
-        }
+    let mut mpu = Mpu6050::new(i2c, Address::Ad0Low);
+    match mpu.who_am_i() {
+        Ok(value) => println!(
+            "ACK/read at 0x{:02x}: WHO_AM_I=0x{:02x}",
+            MPU_ADDR_AD0_LOW, value
+        ),
+        Err(error) => println!("No read at 0x{:02x}: {:?}", MPU_ADDR_AD0_LOW, error),
     }
+    let i2c = mpu.release();
+    let mut mpu = Mpu6050::new(i2c, Address::Ad0High);
+    match mpu.who_am_i() {
+        Ok(value) => println!(
+            "ACK/read at 0x{:02x}: WHO_AM_I=0x{:02x}",
+            MPU_ADDR_AD0_HIGH, value
+        ),
+        Err(error) => println!("No read at 0x{:02x}: {:?}", MPU_ADDR_AD0_HIGH, error),
+    }
+    mpu.release()
 }
 
-fn probe_imu(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) -> ProbeResult {
+fn probe_imu_driver(mpu: &mut BoardMpu<'_>, address: u8) -> ProbeResult {
     println!("Probing bus_address=0x{:02x}", address);
     let mut who_am_i = None;
+    let mut identity = None;
     let mut pwr_mgmt_1 = None;
 
-    match read_reg(i2c, address, REG_WHO_AM_I) {
+    match mpu.who_am_i() {
         Ok(value) => {
             who_am_i = Some(value);
-            let identity = ImuIdentity::from_who_am_i(value);
+            identity = mpu.identity().ok();
             println!(
                 "bus_address=0x{:02x} who_am_i=0x{:02x} identity={}",
                 address,
                 value,
-                identity.description()
+                identity.unwrap_or(Identity::Unknown(value)).description()
             );
-            if let ImuIdentity::Unknown(id) = identity {
+            if let Some(Identity::Unknown(id)) = identity {
                 println!(
                     "bus_address=0x{:02x}: unknown WHO_AM_I=0x{:02x}; raw reads will still be attempted",
                     address, id
@@ -538,15 +475,9 @@ fn probe_imu(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) -> ProbeResult {
         Err(error) => println!("0x{:02x}: WHO_AM_I read failed: {:?}", address, error),
     }
 
-    match read_reg(i2c, address, REG_PWR_MGMT_1) {
-        Ok(value) => {
-            pwr_mgmt_1 = Some(value);
-            println!("bus_address=0x{:02x} pwr_mgmt_1=0x{:02x}", address, value)
-        }
-        Err(error) => println!("0x{:02x}: PWR_MGMT_1 read failed: {:?}", address, error),
-    }
+    println!("0x{:02x}: PWR_MGMT_1 read failed: not exposed", address);
 
-    let raw_block_readable = read_raw_block(i2c, address).is_ok();
+    let raw_block_readable = mpu.read_raw_accel_gyro_temp().is_ok();
     println!(
         "bus_address=0x{:02x} raw_block_0x3b_readable={}",
         address, raw_block_readable
@@ -555,13 +486,14 @@ fn probe_imu(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) -> ProbeResult {
     ProbeResult {
         address,
         who_am_i,
+        identity,
         pwr_mgmt_1,
         raw_block_readable,
     }
 }
 
 fn log_verification_summary(probe: ProbeResult) {
-    let identity = probe.who_am_i.map(ImuIdentity::from_who_am_i);
+    let identity = probe.identity;
     let evidence = VerificationEvidence {
         package_marking_matches: true,
         i2c_ack: probe.who_am_i.is_some() || probe.pwr_mgmt_1.is_some(),
@@ -585,7 +517,7 @@ fn log_verification_summary(probe: ProbeResult) {
     println!("verification_level={}", evidence.level().as_str());
     println!(
         "non_classic_identity={}",
-        matches!(identity, Some(ImuIdentity::Mpu6500Compatible))
+        matches!(identity, Some(Identity::Mpu6500Compatible))
     );
     println!(
         "pending_tests=six_face,accel_scale_range,gyro_scale_range,gyro_bias,temp_sanity,self_test,fifo_interrupt,timing_noise"
@@ -593,20 +525,22 @@ fn log_verification_summary(probe: ProbeResult) {
     println!("verification_summary_end");
 }
 
-fn read_motion_sample(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8, raw_sequence: &mut u64) {
-    match read_raw_block(i2c, address) {
-        Ok(data) => {
+fn read_motion_sample(mpu: &mut BoardMpu<'_>, address: u8, raw_sequence: &mut u64) {
+    match mpu.read_raw_accel_gyro_temp() {
+        Ok(raw) => {
             let timestamp_us = Instant::now().duration_since_epoch().as_micros();
-            let ax = be_i16(data[0], data[1]);
-            let ay = be_i16(data[2], data[3]);
-            let az = be_i16(data[4], data[5]);
-            let temp = be_i16(data[6], data[7]);
-            let gx = be_i16(data[8], data[9]);
-            let gy = be_i16(data[10], data[11]);
-            let gz = be_i16(data[12], data[13]);
             println!(
                 "RAW 0x{:02x}: accel=({}, {}, {}) temp_raw={} gyro=({}, {}, {}) timestamp_us={} sequence={} timestamp_source=device_instant",
-                address, ax, ay, az, temp, gx, gy, gz, timestamp_us, *raw_sequence
+                address,
+                raw.accel[0],
+                raw.accel[1],
+                raw.accel[2],
+                raw.temp,
+                raw.gyro[0],
+                raw.gyro[1],
+                raw.gyro[2],
+                timestamp_us,
+                *raw_sequence
             );
             *raw_sequence = raw_sequence.wrapping_add(1);
         }
@@ -614,67 +548,25 @@ fn read_motion_sample(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8, raw_seq
     }
 }
 
-fn read_raw_block(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: u8,
-) -> Result<[u8; 14], esp_hal::i2c::master::Error> {
-    let mut data = [0u8; 14];
-    i2c.write_read(address, &[REG_ACCEL_XOUT_H], &mut data)?;
-    Ok(data)
+fn accel_range_from_setting(setting: u8) -> AccelRange {
+    match setting {
+        0 => AccelRange::G2,
+        1 => AccelRange::G4,
+        2 => AccelRange::G8,
+        _ => AccelRange::G16,
+    }
 }
 
-fn read_reg(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: u8,
-    register: u8,
-) -> Result<u8, esp_hal::i2c::master::Error> {
-    let mut data = [0u8; 1];
-    i2c.write_read(address, &[register], &mut data)?;
-    Ok(data[0])
+fn gyro_range_from_setting(setting: u8) -> GyroRange {
+    match setting {
+        0 => GyroRange::Dps250,
+        1 => GyroRange::Dps500,
+        2 => GyroRange::Dps1000,
+        _ => GyroRange::Dps2000,
+    }
 }
 
-fn write_reg(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: u8,
-    register: u8,
-    value: u8,
-) -> Result<(), esp_hal::i2c::master::Error> {
-    i2c.write(address, &[register, value])
-}
-
-fn write_masked(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: u8,
-    register: u8,
-    mask: u8,
-    value: u8,
-) -> Result<(), esp_hal::i2c::master::Error> {
-    let current = read_reg(i2c, address, register)?;
-    write_reg(i2c, address, register, (current & !mask) | (value & mask))
-}
-
-fn read_fifo_count(i2c: &mut I2c<'_, esp_hal::Blocking>, address: u8) -> Option<u16> {
-    let mut data = [0u8; 2];
-    i2c.write_read(address, &[REG_FIFO_COUNTH], &mut data)
-        .ok()?;
-    Some(u16::from_be_bytes(data))
-}
-
-fn read_fifo_bytes(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: u8,
-    len: usize,
-) -> Result<(), esp_hal::i2c::master::Error> {
-    let mut data = [0u8; FIFO_ACCEL_GYRO_FRAME_BYTES as usize];
-    i2c.write_read(address, &[REG_FIFO_R_W], &mut data[..len])
-}
-
-fn average_raw(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    delay: &Delay,
-    address: u8,
-    samples: i32,
-) -> Option<RawAverage> {
+fn average_raw(mpu: &mut BoardMpu<'_>, delay: &Delay, samples: i32) -> Option<RawAverage> {
     let mut ax = 0i32;
     let mut ay = 0i32;
     let mut az = 0i32;
@@ -682,13 +574,13 @@ fn average_raw(
     let mut gy = 0i32;
     let mut gz = 0i32;
     for _ in 0..samples {
-        let data = read_raw_block(i2c, address).ok()?;
-        ax += be_i16(data[0], data[1]) as i32;
-        ay += be_i16(data[2], data[3]) as i32;
-        az += be_i16(data[4], data[5]) as i32;
-        gx += be_i16(data[8], data[9]) as i32;
-        gy += be_i16(data[10], data[11]) as i32;
-        gz += be_i16(data[12], data[13]) as i32;
+        let raw = mpu.read_raw_accel_gyro_temp().ok()?;
+        ax += raw.accel[0] as i32;
+        ay += raw.accel[1] as i32;
+        az += raw.accel[2] as i32;
+        gx += raw.gyro[0] as i32;
+        gy += raw.gyro[1] as i32;
+        gz += raw.gyro[2] as i32;
         delay.delay_millis(10);
     }
     Some(RawAverage {
@@ -711,8 +603,4 @@ fn fmt_opt_hex(value: Option<u8>) -> HexOpt {
 
 fn fmt_opt_u16(value: Option<u16>) -> U16Opt {
     U16Opt(value)
-}
-
-fn be_i16(high: u8, low: u8) -> i16 {
-    i16::from_be_bytes([high, low])
 }

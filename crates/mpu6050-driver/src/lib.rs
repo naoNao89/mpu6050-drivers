@@ -12,40 +12,102 @@ pub enum Address {
 }
 
 impl Address {
-    pub const fn as_u8(self) -> u8 {
+    const fn as_u8(self) -> u8 {
         self as u8
     }
 }
 
-pub mod registers {
-    pub const SMPLRT_DIV: u8 = 0x19;
-    pub const CONFIG: u8 = 0x1A;
+mod registers {
     pub const GYRO_CONFIG: u8 = 0x1B;
     pub const ACCEL_CONFIG: u8 = 0x1C;
     pub const FIFO_EN: u8 = 0x23;
     pub const INT_ENABLE: u8 = 0x38;
     pub const INT_STATUS: u8 = 0x3A;
     pub const ACCEL_XOUT_H: u8 = 0x3B;
-    pub const ACCEL_XOUT_L: u8 = 0x3C;
-    pub const ACCEL_YOUT_H: u8 = 0x3D;
-    pub const ACCEL_YOUT_L: u8 = 0x3E;
-    pub const ACCEL_ZOUT_H: u8 = 0x3F;
-    pub const ACCEL_ZOUT_L: u8 = 0x40;
-    pub const TEMP_OUT_H: u8 = 0x41;
-    pub const TEMP_OUT_L: u8 = 0x42;
-    pub const GYRO_XOUT_H: u8 = 0x43;
-    pub const GYRO_XOUT_L: u8 = 0x44;
-    pub const GYRO_YOUT_H: u8 = 0x45;
-    pub const GYRO_YOUT_L: u8 = 0x46;
-    pub const GYRO_ZOUT_H: u8 = 0x47;
-    pub const GYRO_ZOUT_L: u8 = 0x48;
     pub const USER_CTRL: u8 = 0x6A;
     pub const PWR_MGMT_1: u8 = 0x6B;
     pub const FIFO_COUNTH: u8 = 0x72;
-    pub const FIFO_COUNTL: u8 = 0x73;
     pub const FIFO_R_W: u8 = 0x74;
     pub const WHO_AM_I: u8 = 0x75;
 }
+
+const ACCEL_RANGE_MASK: u8 = 0x18;
+const GYRO_RANGE_MASK: u8 = 0x18;
+const SELF_TEST_MASK: u8 = 0xE0;
+const USER_CTRL_FIFO_EN: u8 = 1 << 6;
+const USER_CTRL_FIFO_RESET: u8 = 1 << 2;
+const INT_ENABLE_DATA_RDY: u8 = 1 << 0;
+const INT_ENABLE_FIFO_OFLOW: u8 = 1 << 4;
+const INT_STATUS_DATA_RDY: u8 = 1 << 0;
+const INT_STATUS_FIFO_OFLOW: u8 = 1 << 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Identity {
+    Mpu6050,
+    Mpu6500Compatible,
+    Unknown(u8),
+}
+
+impl Identity {
+    const fn from_who_am_i(id: u8) -> Self {
+        decode_identity(id)
+    }
+}
+
+const fn decode_identity(id: u8) -> Identity {
+    match id {
+        0x68 => Identity::Mpu6050,
+        0x70 => Identity::Mpu6500Compatible,
+        other => Identity::Unknown(other),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AccelRange {
+    G2 = 0,
+    G4 = 1,
+    G8 = 2,
+    G16 = 3,
+}
+
+impl AccelRange {
+    const fn bits(self) -> u8 {
+        (self as u8) << 3
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum GyroRange {
+    Dps250 = 0,
+    Dps500 = 1,
+    Dps1000 = 2,
+    Dps2000 = 3,
+}
+
+impl GyroRange {
+    const fn bits(self) -> u8 {
+        (self as u8) << 3
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntStatus {
+    bits: u8,
+}
+
+impl IntStatus {
+    pub const fn data_ready(self) -> bool {
+        self.bits & INT_STATUS_DATA_RDY != 0
+    }
+
+    pub const fn fifo_overflow(self) -> bool {
+        self.bits & INT_STATUS_FIFO_OFLOW != 0
+    }
+}
+
+const FIFO_SOURCES_ACCEL_XYZ_GYRO_XYZ: u8 = (1 << 6) | (1 << 5) | (1 << 4) | (1 << 3);
 
 pub const ACCEL_LSB_PER_G_2G: f64 = 16_384.0;
 pub const GYRO_LSB_PER_DPS_250DPS: f64 = 131.0;
@@ -104,8 +166,90 @@ where
         self.write_register(registers::PWR_MGMT_1, 0x00)
     }
 
+    pub fn reset(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::PWR_MGMT_1, 0x80)
+    }
+
     pub fn who_am_i(&mut self) -> Result<u8, I2C::Error> {
         self.read_register(registers::WHO_AM_I)
+    }
+
+    pub fn identity(&mut self) -> Result<Identity, I2C::Error> {
+        self.who_am_i().map(Identity::from_who_am_i)
+    }
+
+    pub fn set_accel_range(&mut self, range: AccelRange) -> Result<(), I2C::Error> {
+        self.write_masked(registers::ACCEL_CONFIG, ACCEL_RANGE_MASK, range.bits())
+    }
+
+    pub fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), I2C::Error> {
+        self.write_masked(registers::GYRO_CONFIG, GYRO_RANGE_MASK, range.bits())
+    }
+
+    pub fn set_accel_self_test(&mut self, enabled: bool) -> Result<(), I2C::Error> {
+        self.write_masked(
+            registers::ACCEL_CONFIG,
+            SELF_TEST_MASK,
+            if enabled { SELF_TEST_MASK } else { 0 },
+        )
+    }
+
+    pub fn set_gyro_self_test(&mut self, enabled: bool) -> Result<(), I2C::Error> {
+        self.write_masked(
+            registers::GYRO_CONFIG,
+            SELF_TEST_MASK,
+            if enabled { SELF_TEST_MASK } else { 0 },
+        )
+    }
+
+    pub fn reset_fifo(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::USER_CTRL, USER_CTRL_FIFO_RESET)
+    }
+    pub fn enable_motion_fifo(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::FIFO_EN, FIFO_SOURCES_ACCEL_XYZ_GYRO_XYZ)
+    }
+    pub fn disable_fifo_sources(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::FIFO_EN, 0)
+    }
+    pub fn enable_fifo(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::USER_CTRL, USER_CTRL_FIFO_EN)
+    }
+    pub fn disable_fifo(&mut self) -> Result<(), I2C::Error> {
+        self.write_register(registers::USER_CTRL, 0)
+    }
+    pub fn fifo_count(&mut self) -> Result<u16, I2C::Error> {
+        let mut bytes = [0_u8; 2];
+        self.i2c
+            .write_read(self.address.as_u8(), &[registers::FIFO_COUNTH], &mut bytes)?;
+        Ok(u16::from_be_bytes(bytes))
+    }
+    fn read_fifo_byte(&mut self) -> Result<u8, I2C::Error> {
+        self.read_register(registers::FIFO_R_W)
+    }
+    pub fn read_fifo_bytes(&mut self, bytes: &mut [u8]) -> Result<(), I2C::Error> {
+        for byte in bytes {
+            *byte = self.read_fifo_byte()?;
+        }
+        Ok(())
+    }
+    pub fn enable_data_ready_interrupt(&mut self) -> Result<(), I2C::Error> {
+        self.write_masked(
+            registers::INT_ENABLE,
+            INT_ENABLE_DATA_RDY,
+            INT_ENABLE_DATA_RDY,
+        )
+    }
+
+    pub fn enable_fifo_overflow_interrupt(&mut self) -> Result<(), I2C::Error> {
+        self.write_masked(
+            registers::INT_ENABLE,
+            INT_ENABLE_FIFO_OFLOW,
+            INT_ENABLE_FIFO_OFLOW,
+        )
+    }
+    pub fn int_status(&mut self) -> Result<IntStatus, I2C::Error> {
+        self.read_register(registers::INT_STATUS)
+            .map(|bits| IntStatus { bits })
     }
 
     pub fn read_raw_accel_gyro_temp(&mut self) -> Result<RawAccelGyroTemp, I2C::Error> {
@@ -136,6 +280,11 @@ where
 
     fn write_register(&mut self, register: u8, value: u8) -> Result<(), I2C::Error> {
         self.i2c.write(self.address.as_u8(), &[register, value])
+    }
+
+    fn write_masked(&mut self, register: u8, mask: u8, value: u8) -> Result<(), I2C::Error> {
+        let current = self.read_register(register)?;
+        self.write_register(register, (current & !mask) | (value & mask))
     }
 }
 

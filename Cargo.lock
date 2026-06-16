@@ -1069,6 +1069,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "log",
+ "mpu6050-driver",
 ]
 
 [[package]]
