@@ -10,6 +10,8 @@ use esp_hal::{
     main,
     time::{Duration, Instant, Rate},
 };
+#[cfg(feature = "binary-frames")]
+use esp_println::Printer;
 use esp_println::println;
 use mpu6050_driver::{AccelRange, Address, GyroRange, Identity, Mpu6050};
 
@@ -18,6 +20,14 @@ const MPU_ADDR_AD0_HIGH: u8 = 0x69;
 
 const FIFO_ACCEL_GYRO_FRAME_BYTES: u16 = 12;
 const RAW_STREAM_PERIOD_MS: u32 = 100;
+#[cfg(feature = "binary-frames")]
+const BINARY_FRAME_MAGIC: [u8; 2] = *b"IM";
+#[cfg(feature = "binary-frames")]
+const BINARY_FRAME_VERSION: u8 = 1;
+#[cfg(feature = "binary-frames")]
+const BINARY_FRAME_PAYLOAD_LEN: u8 = 32;
+#[cfg(feature = "binary-frames")]
+const BINARY_FRAME_LEN: usize = 38;
 
 // Reference dev-board wiring used by this bring-up firmware.
 //
@@ -222,7 +232,7 @@ fn main() -> ! {
         .with_timeout(BusTimeout::Maximum)
         .with_software_timeout(SoftwareTimeout::Transaction(Duration::from_millis(50)));
 
-    let mut i2c = I2c::new(peripherals.I2C0, config)
+    let i2c = I2c::new(peripherals.I2C0, config)
         .expect("failed to initialize I2C0")
         .with_scl(peripherals.GPIO0)
         .with_sda(peripherals.GPIO1);
@@ -240,7 +250,7 @@ fn main() -> ! {
         MPU_ADDR_AD0_LOW, wake_ok
     );
     let primary_probe = probe_imu_driver(&mut mpu, MPU_ADDR_AD0_LOW);
-    let mut i2c = mpu.release();
+    let i2c = mpu.release();
     let mut high_mpu = Mpu6050::new(i2c, Address::Ad0High);
     let _ = probe_imu_driver(&mut high_mpu, MPU_ADDR_AD0_HIGH);
     let i2c = high_mpu.release();
@@ -453,7 +463,7 @@ fn probe_imu_driver(mpu: &mut BoardMpu<'_>, address: u8) -> ProbeResult {
     println!("Probing bus_address=0x{:02x}", address);
     let mut who_am_i = None;
     let mut identity = None;
-    let mut pwr_mgmt_1 = None;
+    let pwr_mgmt_1 = None;
 
     match mpu.who_am_i() {
         Ok(value) => {
@@ -529,6 +539,19 @@ fn read_motion_sample(mpu: &mut BoardMpu<'_>, address: u8, raw_sequence: &mut u6
     match mpu.read_raw_accel_gyro_temp() {
         Ok(raw) => {
             let timestamp_us = Instant::now().duration_since_epoch().as_micros();
+            #[cfg(feature = "binary-frames")]
+            {
+                let frame = encode_binary_frame(
+                    address,
+                    *raw_sequence,
+                    timestamp_us as u64,
+                    raw.accel,
+                    raw.temp,
+                    raw.gyro,
+                );
+                Printer::write_bytes(&frame);
+            }
+            #[cfg(not(feature = "binary-frames"))]
             println!(
                 "RAW 0x{:02x}: accel=({}, {}, {}) temp_raw={} gyro=({}, {}, {}) timestamp_us={} sequence={} timestamp_source=device_instant",
                 address,
@@ -546,6 +569,54 @@ fn read_motion_sample(mpu: &mut BoardMpu<'_>, address: u8, raw_sequence: &mut u6
         }
         Err(error) => println!("RAW 0x{:02x}: read failed: {:?}", address, error),
     }
+}
+
+#[cfg(feature = "binary-frames")]
+fn encode_binary_frame(
+    address: u8,
+    sequence: u64,
+    timestamp_us: u64,
+    accel: [i16; 3],
+    temp: i16,
+    gyro: [i16; 3],
+) -> [u8; BINARY_FRAME_LEN] {
+    let mut b = [0u8; BINARY_FRAME_LEN];
+    b[0..2].copy_from_slice(&BINARY_FRAME_MAGIC);
+    b[2] = BINARY_FRAME_VERSION;
+    b[3] = BINARY_FRAME_PAYLOAD_LEN;
+    b[4] = address;
+    b[6..14].copy_from_slice(&sequence.to_le_bytes());
+    b[14..22].copy_from_slice(&timestamp_us.to_le_bytes());
+    for (off, v) in [
+        (22, accel[0]),
+        (24, accel[1]),
+        (26, accel[2]),
+        (28, temp),
+        (30, gyro[0]),
+        (32, gyro[1]),
+        (34, gyro[2]),
+    ] {
+        b[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    let crc = crc16_ccitt_false(&b[..BINARY_FRAME_LEN - 2]);
+    b[BINARY_FRAME_LEN - 2..].copy_from_slice(&crc.to_le_bytes());
+    b
+}
+
+#[cfg(feature = "binary-frames")]
+fn crc16_ccitt_false(data: &[u8]) -> u16 {
+    let mut crc = 0xffffu16;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
 }
 
 fn accel_range_from_setting(setting: u8) -> AccelRange {
