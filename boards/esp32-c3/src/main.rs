@@ -11,7 +11,7 @@ use esp_hal::{
     time::{Duration, Instant, Rate},
 };
 #[cfg(feature = "binary-frames")]
-use esp_println::print;
+use esp_println::Printer;
 use esp_println::println;
 use mpu6050_driver::{AccelRange, Address, GyroRange, Identity, Mpu6050};
 
@@ -20,9 +20,13 @@ const MPU_ADDR_AD0_HIGH: u8 = 0x69;
 
 const FIFO_ACCEL_GYRO_FRAME_BYTES: u16 = 12;
 const RAW_STREAM_PERIOD_MS: u32 = 100;
+#[cfg(feature = "binary-frames")]
 const BINARY_FRAME_MAGIC: [u8; 2] = *b"IM";
+#[cfg(feature = "binary-frames")]
 const BINARY_FRAME_VERSION: u8 = 1;
+#[cfg(feature = "binary-frames")]
 const BINARY_FRAME_PAYLOAD_LEN: u8 = 32;
+#[cfg(feature = "binary-frames")]
 const BINARY_FRAME_LEN: usize = 38;
 
 // Reference dev-board wiring used by this bring-up firmware.
@@ -228,7 +232,7 @@ fn main() -> ! {
         .with_timeout(BusTimeout::Maximum)
         .with_software_timeout(SoftwareTimeout::Transaction(Duration::from_millis(50)));
 
-    let mut i2c = I2c::new(peripherals.I2C0, config)
+    let i2c = I2c::new(peripherals.I2C0, config)
         .expect("failed to initialize I2C0")
         .with_scl(peripherals.GPIO0)
         .with_sda(peripherals.GPIO1);
@@ -246,7 +250,7 @@ fn main() -> ! {
         MPU_ADDR_AD0_LOW, wake_ok
     );
     let primary_probe = probe_imu_driver(&mut mpu, MPU_ADDR_AD0_LOW);
-    let mut i2c = mpu.release();
+    let i2c = mpu.release();
     let mut high_mpu = Mpu6050::new(i2c, Address::Ad0High);
     let _ = probe_imu_driver(&mut high_mpu, MPU_ADDR_AD0_HIGH);
     let i2c = high_mpu.release();
@@ -459,7 +463,7 @@ fn probe_imu_driver(mpu: &mut BoardMpu<'_>, address: u8) -> ProbeResult {
     println!("Probing bus_address=0x{:02x}", address);
     let mut who_am_i = None;
     let mut identity = None;
-    let mut pwr_mgmt_1 = None;
+    let pwr_mgmt_1 = None;
 
     match mpu.who_am_i() {
         Ok(value) => {
@@ -545,9 +549,7 @@ fn read_motion_sample(mpu: &mut BoardMpu<'_>, address: u8, raw_sequence: &mut u6
                     raw.temp,
                     raw.gyro,
                 );
-                for b in frame {
-                    print!("{}", b as char);
-                }
+                Printer::write_bytes(&frame);
             }
             #[cfg(not(feature = "binary-frames"))]
             println!(
