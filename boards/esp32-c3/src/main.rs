@@ -13,7 +13,10 @@ use esp_hal::{
 #[cfg(feature = "binary-frames")]
 use esp_println::Printer;
 use esp_println::println;
-use mpu6050_driver::{AccelRange, Address, GyroRange, Identity, Mpu6050, RawAccelGyroTemp};
+use mpu6050_driver::{
+    AccelRange, Address, GyroRange, Identity, Mpu6050, RawAccelGyroTemp, RawReadOutcome,
+    RawRetryPolicy,
+};
 
 const MPU_ADDR_AD0_LOW: u8 = 0x68;
 const MPU_ADDR_AD0_HIGH: u8 = 0x69;
@@ -536,30 +539,19 @@ fn log_verification_summary(probe: ProbeResult) {
 }
 
 fn read_motion_sample_retry_once(mpu: &mut BoardMpu<'_>, address: u8, raw_sequence: &mut u64) {
-    match mpu.read_raw_accel_gyro_temp() {
-        Ok(raw) => {
-            if !raw.is_suspicious() {
-                emit_motion_sample(address, raw_sequence, raw);
-                return;
-            }
-
-            match mpu.read_raw_accel_gyro_temp() {
-                Ok(retry) if !retry.is_suspicious() => {
-                    #[cfg(not(feature = "binary-frames"))]
-                    println!(
-                        "RAW 0x{:02x}: suspicious sample recovered by retry sequence={}",
-                        address, *raw_sequence
-                    );
-                    emit_motion_sample(address, raw_sequence, retry);
-                }
-                Ok(retry) => {
-                    log_suspicious_sample("retry_suspicious_skipped", address, *raw_sequence, retry)
-                }
-                Err(error) => println!(
-                    "RAW 0x{:02x}: suspicious sample retry failed: {:?}",
-                    address, error
-                ),
-            }
+    match mpu.read_raw_with_retry(RawRetryPolicy::reject_after_retries(1)) {
+        Ok(RawReadOutcome::Clean { raw } | RawReadOutcome::Recovered { raw, .. }) => {
+            emit_motion_sample(address, raw_sequence, raw);
+        }
+        Ok(RawReadOutcome::RejectedSuspicious { raw, .. }) => {
+            log_suspicious_sample("retry_suspicious_skipped", address, *raw_sequence, raw)
+        }
+        Ok(RawReadOutcome::RetryError { error, .. }) => println!(
+            "RAW 0x{:02x}: suspicious sample retry failed: {:?}",
+            address, error
+        ),
+        Ok(RawReadOutcome::AcceptedSuspicious { raw, .. }) => {
+            emit_motion_sample(address, raw_sequence, raw)
         }
         Err(error) => println!("RAW 0x{:02x}: read failed: {:?}", address, error),
     }
