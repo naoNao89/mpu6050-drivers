@@ -88,6 +88,104 @@ fn write_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct IntegrityStats {
+    total: u64,
+    recovered: u64,
+    rejected: u64,
+    retry_error: u64,
+    accepted: u64,
+}
+
+impl IntegrityStats {
+    fn record_sample(&mut self) {
+        self.total = self.total.saturating_add(1);
+    }
+
+    fn record_event(&mut self, event: RawIntegrityEvent) {
+        match event.outcome.as_str() {
+            "recovered" => self.recovered = self.recovered.saturating_add(1),
+            "rejected" => self.rejected = self.rejected.saturating_add(1),
+            "retry_error" => self.retry_error = self.retry_error.saturating_add(1),
+            "accepted" => self.accepted = self.accepted.saturating_add(1),
+            _ => {}
+        }
+    }
+
+    fn record_text(&mut self, text: &str, line_buf: &mut String) {
+        line_buf.push_str(text);
+        while let Some(pos) = line_buf.find('\n') {
+            let mut line = line_buf.drain(..=pos).collect::<String>();
+            line.truncate(line.trim_end_matches(['\r', '\n']).len());
+            self.record_line(&line);
+        }
+    }
+
+    fn record_line(&mut self, line: &str) {
+        if parse_raw_line(line).is_some() {
+            self.record_sample();
+        }
+        if let Some(event) = parse_raw_integrity_event(line) {
+            self.record_event(event);
+        }
+    }
+
+    fn suspicious(&self) -> u64 {
+        self.recovered
+            .saturating_add(self.rejected)
+            .saturating_add(self.retry_error)
+            .saturating_add(self.accepted)
+    }
+
+    fn clean(&self) -> u64 {
+        self.total.saturating_sub(self.suspicious())
+    }
+
+    fn summary_line(&self) -> String {
+        format!(
+            "integrity_stats total={} clean={} suspicious={} recovered={} rejected={} retry_error={}",
+            self.total,
+            self.clean(),
+            self.suspicious(),
+            self.recovered,
+            self.rejected,
+            self.retry_error
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawIntegrityEvent {
+    outcome: String,
+}
+
+fn parse_raw_integrity_event(line: &str) -> Option<RawIntegrityEvent> {
+    let mut fields = line.split_whitespace();
+    if fields.next()? != "raw_integrity_event" {
+        return None;
+    }
+    let mut outcome = None;
+    for field in fields {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        if key == "outcome" && !value.is_empty() {
+            outcome = Some(value.to_ascii_lowercase());
+        }
+    }
+    Some(RawIntegrityEvent { outcome: outcome? })
+}
+
+fn emit_integrity_stats<W: Write>(stats: &IntegrityStats, log: Option<&mut W>) -> io::Result<()> {
+    let line = stats.summary_line();
+    println!("{line}");
+    if let Some(log) = log {
+        writeln!(log, "{line}")?;
+        log.flush()?;
+    }
+    Ok(())
+}
+
 fn read_serial_for<W: Write>(
     #[allow(unused_mut)] mut ser: &mut dyn serialport::SerialPort,
     seconds: f64,
@@ -126,6 +224,7 @@ fn read_serial_binary_for<W: Write>(
     ser: &mut dyn serialport::SerialPort,
     seconds: Option<f64>,
     out: &mut W,
+    mut stats: Option<&mut IntegrityStats>,
 ) -> io::Result<()> {
     let deadline = monitor_deadline(seconds, Instant::now());
     let mut buf = [0u8; 2048];
@@ -137,6 +236,9 @@ fn read_serial_binary_for<W: Write>(
                 for ev in dec.push(&buf[..n]) {
                     match ev {
                         BinaryDecodeEvent::Sample(s) => {
+                            if let Some(stats) = stats.as_mut() {
+                                stats.record_sample();
+                            }
                             let line = raw_sample_line(&s);
                             println!("{line}");
                             writeln!(out, "{line}")?;
@@ -167,7 +269,7 @@ pub fn capture(port: &str, baud: u32, seconds: f64, out: &Path, mode: StreamMode
     );
     match mode {
         StreamMode::Text => read_serial_for(&mut *ser, seconds, &mut f, |_| {})?,
-        StreamMode::Binary => read_serial_binary_for(&mut *ser, Some(seconds), &mut f)?,
+        StreamMode::Binary => read_serial_binary_for(&mut *ser, Some(seconds), &mut f, None)?,
     }
     writeln!(f, "\n# capture_end")?;
     Ok(0)
@@ -188,14 +290,18 @@ pub fn monitor(
         None
     };
     println!("--- monitoring {port} @{baud}, Ctrl-C to quit ---");
+    let mut stats = IntegrityStats::default();
     if mode == StreamMode::Binary {
-        if let Some(f) = log.as_mut() {
-            read_serial_binary_for(&mut *ser, duration, f)?;
+        let result = if let Some(f) = log.as_mut() {
+            read_serial_binary_for(&mut *ser, duration, f, Some(&mut stats))
         } else {
-            read_serial_binary_for(&mut *ser, duration, &mut io::sink())?;
-        }
+            read_serial_binary_for(&mut *ser, duration, &mut io::sink(), Some(&mut stats))
+        };
+        emit_integrity_stats(&stats, log.as_mut())?;
+        result?;
     } else {
         let mut buf = [0u8; 2048];
+        let mut line_buf = String::new();
         let deadline = monitor_deadline(duration, Instant::now());
         while before_monitor_deadline(deadline, Instant::now()) {
             match ser.read(&mut buf) {
@@ -208,11 +314,16 @@ pub fn monitor(
                         f.write_all(text.as_bytes())?;
                         f.flush()?;
                     }
+                    stats.record_text(&text, &mut line_buf);
                 }
                 Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => {
+                    emit_integrity_stats(&stats, log.as_mut())?;
+                    return Err(Box::new(e));
+                }
             }
         }
+        emit_integrity_stats(&stats, log.as_mut())?;
     }
     Ok(0)
 }
@@ -1478,6 +1589,42 @@ mod tests {
         assert_eq!(s.gx, 5);
         assert_eq!(s.timestamp_s, None);
         assert_eq!(s.sequence, None);
+    }
+
+    #[test]
+    fn raw_integrity_event_parser_accepts_outcome_with_extra_fields() {
+        let event = parse_raw_integrity_event(
+            "raw_integrity_event seq=28 outcome=recovered retries=1 address=0x68",
+        )
+        .unwrap();
+        assert_eq!(event.outcome, "recovered");
+
+        assert_eq!(parse_raw_integrity_event("RAW 0x68: accel=(1, 2, 3)"), None);
+        assert_eq!(
+            parse_raw_integrity_event("raw_integrity_event seq=28"),
+            None
+        );
+    }
+
+    #[test]
+    fn integrity_stats_counts_samples_events_and_summary() {
+        let mut stats = IntegrityStats::default();
+        let mut line_buf = String::new();
+        stats.record_text(
+            "RAW 0x68: accel=(1, 2, 3) temp_raw=4 gyro=(5, 6, 7)\nraw_integrity_event seq=1 outcome=recovered retries=1\nraw_integrity_event seq=2 outcome=rejected\n",
+            &mut line_buf,
+        );
+        stats.record_line("raw_integrity_event seq=3 outcome=retry_error");
+        stats.record_line("raw_integrity_event seq=4 outcome=accepted");
+        stats.record_sample();
+
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.clean(), 0);
+        assert_eq!(stats.suspicious(), 4);
+        assert_eq!(
+            stats.summary_line(),
+            "integrity_stats total=2 clean=0 suspicious=4 recovered=1 rejected=1 retry_error=1"
+        );
     }
 
     #[test]
