@@ -44,6 +44,8 @@ jobs:
         run: cargo check --locked -p imu-core -p imu-validation -p imu-tool --all-targets --all-features
       - name: no_std core check
         run: cargo check --locked -p imu-core --no-default-features
+      - name: Driver tests
+        run: cargo test --locked -p mpu6050-driver
       - name: Host tests
         run: cargo test --locked -p imu-core -p imu-validation -p imu-tool --all-features
       - name: Host clippy
