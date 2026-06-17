@@ -320,6 +320,95 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use embedded_hal::i2c::{ErrorType, Operation, SevenBitAddress};
+    use std::collections::VecDeque;
+    use std::vec::Vec;
+
+    const CLEAN_RAW: RawAccelGyroTemp = RawAccelGyroTemp::new([1, 2, 3], 4, [5, 6, 7]);
+    const SUSPICIOUS_RAW: RawAccelGyroTemp = RawAccelGyroTemp::new([i16::MAX, 2, 3], 4, [5, 6, 7]);
+    const SUSPICIOUS_RETRY_RAW: RawAccelGyroTemp =
+        RawAccelGyroTemp::new([1, 2, 3], 4, [-1, -1, -1]);
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FakeError {
+        Bus,
+    }
+
+    impl embedded_hal::i2c::Error for FakeError {
+        fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+            embedded_hal::i2c::ErrorKind::Other
+        }
+    }
+
+    enum FakeResponse {
+        Raw(RawAccelGyroTemp),
+        Error(FakeError),
+    }
+
+    struct FakeI2c {
+        responses: VecDeque<FakeResponse>,
+        write_read_count: usize,
+    }
+
+    impl FakeI2c {
+        fn new(responses: Vec<FakeResponse>) -> Self {
+            Self {
+                responses: responses.into(),
+                write_read_count: 0,
+            }
+        }
+    }
+
+    impl ErrorType for FakeI2c {
+        type Error = FakeError;
+    }
+
+    impl I2c for FakeI2c {
+        fn read(&mut self, _address: SevenBitAddress, _read: &mut [u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn write(&mut self, _address: SevenBitAddress, _write: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn write_read(
+            &mut self,
+            _address: SevenBitAddress,
+            write: &[u8],
+            read: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            assert_eq!(write, &[registers::ACCEL_XOUT_H]);
+            assert_eq!(read.len(), 14);
+            self.write_read_count += 1;
+            match self.responses.pop_front().expect("missing fake response") {
+                FakeResponse::Raw(raw) => {
+                    let values = [
+                        raw.accel[0],
+                        raw.accel[1],
+                        raw.accel[2],
+                        raw.temp,
+                        raw.gyro[0],
+                        raw.gyro[1],
+                        raw.gyro[2],
+                    ];
+                    for (chunk, value) in read.chunks_exact_mut(2).zip(values) {
+                        chunk.copy_from_slice(&value.to_be_bytes());
+                    }
+                    Ok(())
+                }
+                FakeResponse::Error(error) => Err(error),
+            }
+        }
+
+        fn transaction(
+            &mut self,
+            _address: SevenBitAddress,
+            _operations: &mut [Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn address_values_match_ad0_pin_state() {
@@ -361,5 +450,109 @@ mod tests {
     fn regression_raw_sample_accepts_nominal_values() {
         let raw = RawAccelGyroTemp::new([-6500, -9900, -9600], 3700, [720, 190, -320]);
         assert!(!raw.is_suspicious());
+    }
+
+    #[test]
+    fn primitive_read_performs_one_transaction() {
+        let fake = FakeI2c::new(std::vec![FakeResponse::Raw(CLEAN_RAW)]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(mpu.read_raw_accel_gyro_temp(), Ok(CLEAN_RAW));
+        assert_eq!(mpu.release().write_read_count, 1);
+    }
+
+    #[test]
+    fn clean_checked_read_performs_one_transaction_and_returns_clean() {
+        let fake = FakeI2c::new(std::vec![FakeResponse::Raw(CLEAN_RAW)]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_checked(),
+            Ok(RawReadOutcome::Clean { raw: CLEAN_RAW })
+        );
+        assert_eq!(mpu.release().write_read_count, 1);
+    }
+
+    #[test]
+    fn suspicious_checked_read_with_zero_retries_rejects_after_one_transaction() {
+        let fake = FakeI2c::new(std::vec![FakeResponse::Raw(SUSPICIOUS_RAW)]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_checked(),
+            Ok(RawReadOutcome::RejectedSuspicious {
+                raw: SUSPICIOUS_RAW,
+                suspicion: RawSampleSuspicion::AccelSentinel,
+                retries: 0,
+            })
+        );
+        assert_eq!(mpu.release().write_read_count, 1);
+    }
+
+    #[test]
+    fn suspicious_then_clean_returns_recovered_after_two_transactions() {
+        let fake = FakeI2c::new(std::vec![
+            FakeResponse::Raw(SUSPICIOUS_RAW),
+            FakeResponse::Raw(CLEAN_RAW),
+        ]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_with_retry(RawRetryPolicy::reject_after_retries(1)),
+            Ok(RawReadOutcome::Recovered {
+                raw: CLEAN_RAW,
+                first_suspicion: RawSampleSuspicion::AccelSentinel,
+                retries: 1,
+            })
+        );
+        assert_eq!(mpu.release().write_read_count, 2);
+    }
+
+    #[test]
+    fn suspicious_then_suspicious_returns_rejected_suspicious() {
+        let fake = FakeI2c::new(std::vec![
+            FakeResponse::Raw(SUSPICIOUS_RAW),
+            FakeResponse::Raw(SUSPICIOUS_RETRY_RAW),
+        ]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_with_retry(RawRetryPolicy::reject_after_retries(1)),
+            Ok(RawReadOutcome::RejectedSuspicious {
+                raw: SUSPICIOUS_RETRY_RAW,
+                suspicion: RawSampleSuspicion::GyroAllMinusOne,
+                retries: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn suspicious_then_bus_error_returns_retry_error_preserving_first_raw_and_suspicion() {
+        let fake = FakeI2c::new(std::vec![
+            FakeResponse::Raw(SUSPICIOUS_RAW),
+            FakeResponse::Error(FakeError::Bus),
+        ]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_with_retry(RawRetryPolicy::reject_after_retries(1)),
+            Ok(RawReadOutcome::RetryError {
+                first_raw: SUSPICIOUS_RAW,
+                first_suspicion: RawSampleSuspicion::AccelSentinel,
+                retries: 1,
+                error: FakeError::Bus,
+            })
+        );
+    }
+
+    #[test]
+    fn accept_policy_returns_accepted_suspicious_after_retries_exhausted() {
+        let fake = FakeI2c::new(std::vec![
+            FakeResponse::Raw(SUSPICIOUS_RAW),
+            FakeResponse::Raw(SUSPICIOUS_RETRY_RAW),
+        ]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        assert_eq!(
+            mpu.read_raw_with_retry(RawRetryPolicy::accept_after_retries(1)),
+            Ok(RawReadOutcome::AcceptedSuspicious {
+                raw: SUSPICIOUS_RETRY_RAW,
+                suspicion: RawSampleSuspicion::GyroAllMinusOne,
+                retries: 1,
+            })
+        );
     }
 }
