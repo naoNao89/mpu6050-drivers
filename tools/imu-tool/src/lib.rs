@@ -165,7 +165,13 @@ pub fn capture(port: &str, baud: u32, seconds: f64, out: &Path, mode: StreamMode
     Ok(0)
 }
 
-pub fn monitor(port: &str, baud: u32, out: Option<&Path>, mode: StreamMode) -> ToolResult {
+pub fn monitor(
+    port: &str,
+    baud: u32,
+    duration: Option<f64>,
+    out: Option<&Path>,
+    mode: StreamMode,
+) -> ToolResult {
     let mut ser = open_serial(port, baud)?;
     let mut log = if let Some(path) = out {
         write_parent(path)?;
@@ -176,13 +182,17 @@ pub fn monitor(port: &str, baud: u32, out: Option<&Path>, mode: StreamMode) -> T
     println!("--- monitoring {port} @{baud}, Ctrl-C to quit ---");
     if mode == StreamMode::Binary {
         if let Some(f) = log.as_mut() {
-            read_serial_binary_for(&mut *ser, None, f)?;
+            read_serial_binary_for(&mut *ser, duration, f)?;
         } else {
-            read_serial_binary_for(&mut *ser, None, &mut io::sink())?;
+            read_serial_binary_for(&mut *ser, duration, &mut io::sink())?;
         }
     } else {
         let mut buf = [0u8; 2048];
+        let deadline = duration.map(|s| Instant::now() + Duration::from_secs_f64(s.max(0.0)));
         loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
             match ser.read(&mut buf) {
                 Ok(0) => {}
                 Ok(n) => {

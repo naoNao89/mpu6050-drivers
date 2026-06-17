@@ -3,6 +3,7 @@ BAUD ?= 115200
 TARGET ?= riscv32imc-unknown-none-elf
 LOG_DIR ?= logs
 LOG_FILE ?=
+DURATION ?=
 NO_FLASH ?= 0
 NO_MONITOR ?= 0
 NO_LOG ?= 0
@@ -26,10 +27,10 @@ flash: build
 	PORT="$(PORT)" ./scripts/esp-port.sh sh -c 'env -u RUSTFLAGS espflash flash --port "$$ESP_PORT" "$(BIN)"'
 
 monitor:
-	PORT="$(PORT)" BAUD="$(BAUD)" TARGET="$(TARGET)" LOG_DIR="$(LOG_DIR)" LOG_FILE="$(LOG_FILE)" NO_FLASH=1 NO_MONITOR="$(NO_MONITOR)" NO_LOG="$(NO_LOG)" ./run.sh
+	PORT="$(PORT)" BAUD="$(BAUD)" TARGET="$(TARGET)" LOG_DIR="$(LOG_DIR)" LOG_FILE="$(LOG_FILE)" DURATION="$(DURATION)" NO_FLASH=1 NO_MONITOR="$(NO_MONITOR)" NO_LOG="$(NO_LOG)" ./run.sh
 
 run:
-	PORT="$(PORT)" BAUD="$(BAUD)" TARGET="$(TARGET)" LOG_DIR="$(LOG_DIR)" LOG_FILE="$(LOG_FILE)" NO_FLASH="$(NO_FLASH)" NO_MONITOR="$(NO_MONITOR)" NO_LOG="$(NO_LOG)" ./run.sh
+	PORT="$(PORT)" BAUD="$(BAUD)" TARGET="$(TARGET)" LOG_DIR="$(LOG_DIR)" LOG_FILE="$(LOG_FILE)" DURATION="$(DURATION)" NO_FLASH="$(NO_FLASH)" NO_MONITOR="$(NO_MONITOR)" NO_LOG="$(NO_LOG)" ./run.sh
 
 validate-stationary:
 	PORT="$(PORT)" NOISE_PSD_BAND_LOW_HZ="$(NOISE_PSD_BAND_LOW_HZ)" NOISE_PSD_BAND_HIGH_HZ="$(NOISE_PSD_BAND_HIGH_HZ)" ./scripts/esp-port.sh sh -c 'cargo run -p imu-tool -- stationary-suite --port "$$ESP_PORT" --seconds "$(SECONDS)" --baud "$(BAUD)" --sample-rate-hz "$(SAMPLE_RATE_HZ)" --label "$(LABEL)" --out-dir "$(LOG_DIR)" --validation-mode "$(VALIDATION_MODE)" $${NOISE_PSD_BAND_LOW_HZ:+--noise-psd-band-low-hz "$$NOISE_PSD_BAND_LOW_HZ"} $${NOISE_PSD_BAND_HIGH_HZ:+--noise-psd-band-high-hz "$$NOISE_PSD_BAND_HIGH_HZ"}'

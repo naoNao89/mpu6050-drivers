@@ -57,6 +57,8 @@ enum Command {
         #[arg(long, default_value_t = 115200)]
         baud: u32,
         #[arg(long)]
+        duration: Option<f64>,
+        #[arg(long)]
         out: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "text")]
         mode: StreamModeArg,
@@ -221,9 +223,10 @@ fn main() -> std::process::ExitCode {
         Command::Monitor {
             port,
             baud,
+            duration,
             out,
             mode,
-        } => imu_tool::monitor(&port, baud, out.as_deref(), mode.into()),
+        } => imu_tool::monitor(&port, baud, duration, out.as_deref(), mode.into()),
         Command::OrientationCapture {
             port,
             seconds,

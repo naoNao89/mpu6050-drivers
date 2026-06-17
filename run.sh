@@ -8,6 +8,7 @@
 #   NO_MONITOR=1 ./run.sh
 #   NO_LOG=1 ./run.sh
 #   LOG_FILE=logs/mpu6050.log ./run.sh
+#   DURATION=300 ./run.sh
 
 set -euo pipefail
 
@@ -21,6 +22,7 @@ BAUD="${BAUD:-115200}"
 TARGET="${TARGET:-riscv32imc-unknown-none-elf}"
 LOG_DIR="${LOG_DIR:-logs}"
 LOG_FILE="${LOG_FILE:-}"
+DURATION="${DURATION:-}"
 BIN="target/${TARGET}/release/mpu6050-esp32c3-bringup"
 
 if [ -z "$PORT" ]; then
@@ -44,8 +46,14 @@ if [ "${NO_MONITOR:-0}" = "1" ]; then
 fi
 
 if [ "${NO_LOG:-0}" = "1" ]; then
-  cargo run -p imu-tool -- monitor --port "$PORT" --baud "$BAUD"
+  monitor_args=(--port "$PORT" --baud "$BAUD")
 else
   mkdir -p "$(dirname "$LOG_FILE")"
-  cargo run -p imu-tool -- monitor --port "$PORT" --baud "$BAUD" --out "$LOG_FILE"
+  monitor_args=(--port "$PORT" --baud "$BAUD" --out "$LOG_FILE")
 fi
+
+if [ -n "$DURATION" ]; then
+  monitor_args+=(--duration "$DURATION")
+fi
+
+cargo run -p imu-tool -- monitor "${monitor_args[@]}"
