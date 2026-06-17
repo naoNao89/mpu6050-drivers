@@ -114,15 +114,23 @@ fn read_serial_for<W: Write>(
     Ok(())
 }
 
+fn monitor_deadline(duration: Option<f64>, now: Instant) -> Option<Instant> {
+    duration.map(|s| now + Duration::from_secs_f64(s.max(0.0)))
+}
+
+fn before_monitor_deadline(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_none_or(|deadline| now < deadline)
+}
+
 fn read_serial_binary_for<W: Write>(
     ser: &mut dyn serialport::SerialPort,
     seconds: Option<f64>,
     out: &mut W,
 ) -> io::Result<()> {
-    let deadline = seconds.map(|s| Instant::now() + Duration::from_secs_f64(s.max(0.0)));
+    let deadline = monitor_deadline(seconds, Instant::now());
     let mut buf = [0u8; 2048];
     let mut dec = BinaryFrameDecoder::new();
-    while deadline.is_none_or(|d| Instant::now() < d) {
+    while before_monitor_deadline(deadline, Instant::now()) {
         match ser.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
@@ -188,11 +196,8 @@ pub fn monitor(
         }
     } else {
         let mut buf = [0u8; 2048];
-        let deadline = duration.map(|s| Instant::now() + Duration::from_secs_f64(s.max(0.0)));
-        loop {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                break;
-            }
+        let deadline = monitor_deadline(duration, Instant::now());
+        while before_monitor_deadline(deadline, Instant::now()) {
             match ser.read(&mut buf) {
                 Ok(0) => {}
                 Ok(n) => {
@@ -1652,6 +1657,35 @@ mod tests {
         assert!(header.ends_with(",timestamp_s_measured,sequence"));
         assert!(text.lines().nth(1).unwrap().ends_with(",0.001000000,7"));
         let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn monitor_deadline_is_absent_when_duration_is_unbounded() {
+        assert!(monitor_deadline(None, Instant::now()).is_none());
+        assert!(before_monitor_deadline(None, Instant::now()));
+    }
+
+    #[test]
+    fn monitor_deadline_uses_positive_duration() {
+        let now = Instant::now();
+        let deadline = monitor_deadline(Some(1.5), now).unwrap();
+
+        assert_eq!(deadline.duration_since(now), Duration::from_secs_f64(1.5));
+        assert!(before_monitor_deadline(Some(deadline), now));
+        assert!(!before_monitor_deadline(Some(deadline), deadline));
+        assert!(!before_monitor_deadline(
+            Some(deadline),
+            deadline + Duration::from_nanos(1)
+        ));
+    }
+
+    #[test]
+    fn monitor_deadline_clamps_negative_duration_to_immediate_expiry() {
+        let now = Instant::now();
+        let deadline = monitor_deadline(Some(-2.0), now).unwrap();
+
+        assert_eq!(deadline, now);
+        assert!(!before_monitor_deadline(Some(deadline), now));
     }
 
     fn sample_with_timing(timestamp_s: Option<f64>, sequence: Option<u64>) -> RawSample {
