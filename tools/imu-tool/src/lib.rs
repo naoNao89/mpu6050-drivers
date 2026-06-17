@@ -1614,6 +1614,28 @@ mod tests {
     }
 
     #[test]
+    fn raw_integrity_event_parser_normalizes_outcome_and_ignores_noise() {
+        let event = parse_raw_integrity_event(
+            "raw_integrity_event reason=GyroAllMinusOne outcome=RECOVERED retries=1",
+        )
+        .unwrap();
+        assert_eq!(event.outcome, "recovered");
+
+        assert_eq!(
+            parse_raw_integrity_event("raw_integrity_event_extra outcome=recovered"),
+            None
+        );
+        assert_eq!(
+            parse_raw_integrity_event("raw_integrity_event outcome="),
+            None
+        );
+        assert_eq!(
+            parse_raw_integrity_event("raw_integrity_event outcome"),
+            None
+        );
+    }
+
+    #[test]
     fn integrity_stats_counts_samples_events_and_summary() {
         let mut stats = IntegrityStats::default();
         let mut line_buf = String::new();
@@ -1631,6 +1653,45 @@ mod tests {
         assert_eq!(
             stats.summary_line(),
             "integrity_stats total=2 clean=0 suspicious=4 recovered=1 rejected=1 retry_error=1"
+        );
+    }
+
+    #[test]
+    fn integrity_stats_buffers_partial_lines_until_newline() {
+        let mut stats = IntegrityStats::default();
+        let mut line_buf = String::new();
+
+        stats.record_text(
+            "RAW 0x68: accel=(1, 2, 3) temp_raw=4 gyro=(5, 6, 7)",
+            &mut line_buf,
+        );
+        assert_eq!(stats.total, 0);
+        assert!(!line_buf.is_empty());
+
+        stats.record_text(
+            " timestamp_us=100 sequence=7 timestamp_source=device_instant\r\nraw_integrity_event seq=7 outcome=recovered retries=1\r\n",
+            &mut line_buf,
+        );
+        assert_eq!(line_buf, "");
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.recovered, 1);
+        assert_eq!(stats.clean(), 0);
+    }
+
+    #[test]
+    fn integrity_stats_ignores_unknown_outcomes_and_saturates_clean() {
+        let mut stats = IntegrityStats::default();
+        stats.record_sample();
+        stats.record_line("raw_integrity_event seq=1 outcome=recovered retries=1");
+        stats.record_line("raw_integrity_event seq=2 outcome=rejected retries=1");
+        stats.record_line("raw_integrity_event seq=3 outcome=weird retries=1");
+
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.suspicious(), 2);
+        assert_eq!(stats.clean(), 0);
+        assert_eq!(
+            stats.summary_line(),
+            "integrity_stats total=1 clean=0 suspicious=2 recovered=1 rejected=1 retry_error=0"
         );
     }
 
