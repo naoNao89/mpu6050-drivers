@@ -323,6 +323,13 @@ pub fn monitor(
                 }
             }
         }
+        if !line_buf.is_empty() {
+            println!();
+            if let Some(f) = log.as_mut() {
+                writeln!(f)?;
+                f.flush()?;
+            }
+        }
         emit_integrity_stats(&stats, log.as_mut())?;
     }
     Ok(0)
