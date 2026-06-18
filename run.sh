@@ -19,6 +19,7 @@ fi
 
 PORT="${PORT:-}"
 BAUD="${BAUD:-115200}"
+MODE="${MODE:-text}"
 TARGET="${TARGET:-riscv32imc-unknown-none-elf}"
 LOG_DIR="${LOG_DIR:-logs}"
 LOG_FILE="${LOG_FILE:-}"
@@ -46,10 +47,10 @@ if [ "${NO_MONITOR:-0}" = "1" ]; then
 fi
 
 if [ "${NO_LOG:-0}" = "1" ]; then
-  monitor_args=(--port "$PORT" --baud "$BAUD")
+  monitor_args=(--port "$PORT" --baud "$BAUD" --mode "$MODE")
 else
   mkdir -p "$(dirname "$LOG_FILE")"
-  monitor_args=(--port "$PORT" --baud "$BAUD" --out "$LOG_FILE")
+  monitor_args=(--port "$PORT" --baud "$BAUD" --out "$LOG_FILE" --mode "$MODE")
 fi
 
 if [ -n "$DURATION" ]; then
