@@ -574,18 +574,23 @@ fn read_motion_sample_retry_once(
         }) => {
             integrity_stats.suspicious_first = integrity_stats.suspicious_first.wrapping_add(1);
             integrity_stats.recovered_by_retry = integrity_stats.recovered_by_retry.wrapping_add(1);
+            #[cfg(feature = "binary-frames")]
+            let _ = (&first_suspicion, retries);
             #[cfg(not(feature = "binary-frames"))]
             println!(
                 "RAW 0x{:02x}: suspicious sample recovered by retry sequence={}",
                 address, *raw_sequence
             );
-            emit_raw_integrity_event(
-                *raw_sequence,
-                "recovered",
-                retries,
-                first_suspicion,
-                integrity_stats,
-            );
+            #[cfg(not(feature = "binary-frames"))]
+            {
+                emit_raw_integrity_event(
+                    *raw_sequence,
+                    "recovered",
+                    retries,
+                    first_suspicion,
+                    integrity_stats,
+                );
+            }
             emit_motion_sample(address, raw_sequence, raw);
         }
         Ok(RawReadOutcome::RejectedSuspicious {
@@ -596,13 +601,18 @@ fn read_motion_sample_retry_once(
             integrity_stats.suspicious_first = integrity_stats.suspicious_first.wrapping_add(1);
             integrity_stats.rejected_suspicious =
                 integrity_stats.rejected_suspicious.wrapping_add(1);
-            emit_raw_integrity_event(
-                *raw_sequence,
-                "rejected",
-                retries,
-                suspicion,
-                integrity_stats,
-            );
+            #[cfg(feature = "binary-frames")]
+            let _ = (&suspicion, retries);
+            #[cfg(not(feature = "binary-frames"))]
+            {
+                emit_raw_integrity_event(
+                    *raw_sequence,
+                    "rejected",
+                    retries,
+                    suspicion,
+                    integrity_stats,
+                );
+            }
             log_suspicious_sample("retry_suspicious_skipped", address, *raw_sequence, raw)
         }
         Ok(RawReadOutcome::RetryError {
@@ -613,13 +623,18 @@ fn read_motion_sample_retry_once(
         }) => {
             integrity_stats.suspicious_first = integrity_stats.suspicious_first.wrapping_add(1);
             integrity_stats.retry_error = integrity_stats.retry_error.wrapping_add(1);
-            emit_raw_integrity_event(
-                *raw_sequence,
-                "retry_error",
-                retries,
-                first_suspicion,
-                integrity_stats,
-            );
+            #[cfg(feature = "binary-frames")]
+            let _ = (&first_suspicion, retries);
+            #[cfg(not(feature = "binary-frames"))]
+            {
+                emit_raw_integrity_event(
+                    *raw_sequence,
+                    "retry_error",
+                    retries,
+                    first_suspicion,
+                    integrity_stats,
+                );
+            }
             println!(
                 "RAW 0x{:02x}: suspicious sample retry failed: {:?}",
                 address, error
@@ -633,19 +648,25 @@ fn read_motion_sample_retry_once(
             integrity_stats.suspicious_first = integrity_stats.suspicious_first.wrapping_add(1);
             integrity_stats.accepted_suspicious =
                 integrity_stats.accepted_suspicious.wrapping_add(1);
-            emit_raw_integrity_event(
-                *raw_sequence,
-                "accepted",
-                retries,
-                suspicion,
-                integrity_stats,
-            );
+            #[cfg(feature = "binary-frames")]
+            let _ = (&suspicion, retries);
+            #[cfg(not(feature = "binary-frames"))]
+            {
+                emit_raw_integrity_event(
+                    *raw_sequence,
+                    "accepted",
+                    retries,
+                    suspicion,
+                    integrity_stats,
+                );
+            }
             emit_motion_sample(address, raw_sequence, raw)
         }
         Err(error) => println!("RAW 0x{:02x}: read failed: {:?}", address, error),
     }
 }
 
+#[cfg(not(feature = "binary-frames"))]
 fn emit_raw_integrity_event(
     sequence: u64,
     outcome: &str,
