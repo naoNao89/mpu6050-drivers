@@ -108,6 +108,54 @@ impl IntStatus {
 }
 
 const FIFO_SOURCES_ACCEL_XYZ_GYRO_XYZ: u8 = (1 << 6) | (1 << 5) | (1 << 4) | (1 << 3);
+/// Bytes per FIFO frame for accel XYZ + gyro XYZ, no temp/ext slaves.
+pub const FIFO_ACCEL_GYRO_FRAME_BYTES: usize = 12;
+
+/// Low-level FIFO diagnostics for streaming/debug burst reads.
+///
+/// Applications should prefer `frame_usable` and `should_reset_fifo` over
+/// interpreting every field directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FifoReadDiagnostics {
+    pub fifo_count_before_bytes: u16,
+    pub fifo_bytes_requested: u16,
+    pub fifo_count_after_bytes: u16,
+    /// True only when INT_STATUS was read successfully and FIFO_OFLOW was set.
+    pub fifo_overflow_seen: bool,
+    /// True when INT_STATUS was read successfully.
+    pub int_status_read_ok: bool,
+    pub read_len_frame_aligned: bool,
+    pub fifo_count_before_frame_aligned: bool,
+    pub fifo_count_after_frame_aligned: bool,
+    pub had_requested_bytes_before_read: bool,
+    pub fifo_count_delta_ok: bool,
+}
+
+impl FifoReadDiagnostics {
+    /// True when the requested read is non-empty, no overflow was confirmed,
+    /// read length and FIFO counts are frame-aligned, and enough bytes were
+    /// present before the read.
+    ///
+    /// Does not require `fifo_count_delta_ok` because FIFO may refill while enabled.
+    pub const fn frame_usable(&self) -> bool {
+        !self.fifo_overflow_seen
+            && self.read_len_frame_aligned
+            && self.fifo_count_before_frame_aligned
+            && self.fifo_count_after_frame_aligned
+            && self.had_requested_bytes_before_read
+            && self.fifo_bytes_requested > 0
+    }
+
+    /// True when confirmed overflow or bad frame alignment suggests FIFO reset.
+    ///
+    /// FIFO reset should follow the device-safe sequence, disabling FIFO/sources
+    /// before reset as appropriate.
+    pub const fn should_reset_fifo(&self) -> bool {
+        self.fifo_overflow_seen
+            || !self.fifo_count_before_frame_aligned
+            || !self.fifo_count_after_frame_aligned
+    }
+}
 
 pub const ACCEL_LSB_PER_G_2G: f64 = 16_384.0;
 pub const GYRO_LSB_PER_DPS_250DPS: f64 = 131.0;
@@ -347,6 +395,56 @@ where
         }
         self.i2c
             .write_read(self.address.as_u8(), &[registers::FIFO_R_W], bytes)
+    }
+
+    /// Reads FIFO bytes and returns diagnostics around the burst read.
+    ///
+    /// This reads INT_STATUS best-effort; on MPU-6050-class devices that read
+    /// consumes/clears interrupt status bits.
+    pub fn read_fifo_bytes_with_diagnostics(
+        &mut self,
+        bytes: &mut [u8],
+    ) -> Result<FifoReadDiagnostics, I2C::Error> {
+        self.read_fifo_bytes_with_diagnostics_frame_size(bytes, FIFO_ACCEL_GYRO_FRAME_BYTES)
+    }
+
+    fn read_fifo_bytes_with_diagnostics_frame_size(
+        &mut self,
+        bytes: &mut [u8],
+        frame_size: usize,
+    ) -> Result<FifoReadDiagnostics, I2C::Error> {
+        let requested_len = bytes.len();
+        let fifo_count_before_bytes = self.fifo_count()?;
+        let (int_status_read_ok, fifo_overflow_seen) = match self.int_status() {
+            Ok(status) => (true, status.fifo_overflow()),
+            Err(_) => (false, false),
+        };
+        self.read_fifo_bytes(bytes)?;
+        let fifo_count_after_bytes = self.fifo_count()?;
+        let fifo_bytes_requested = requested_len.min(u16::MAX as usize) as u16;
+        let read_len_frame_aligned = frame_size != 0 && requested_len.is_multiple_of(frame_size);
+        let fifo_count_before_frame_aligned =
+            frame_size != 0 && (fifo_count_before_bytes as usize).is_multiple_of(frame_size);
+        let fifo_count_after_frame_aligned =
+            frame_size != 0 && (fifo_count_after_bytes as usize).is_multiple_of(frame_size);
+        let had_requested_bytes_before_read = fifo_count_before_bytes as usize >= requested_len;
+        let fifo_count_delta_ok = (fifo_count_before_bytes as usize)
+            .checked_sub(requested_len)
+            .map(|count| count == fifo_count_after_bytes as usize)
+            .unwrap_or(false);
+
+        Ok(FifoReadDiagnostics {
+            fifo_count_before_bytes,
+            fifo_bytes_requested,
+            fifo_count_after_bytes,
+            fifo_overflow_seen,
+            int_status_read_ok,
+            read_len_frame_aligned,
+            fifo_count_before_frame_aligned,
+            fifo_count_after_frame_aligned,
+            had_requested_bytes_before_read,
+            fifo_count_delta_ok,
+        })
     }
     pub fn enable_data_ready_interrupt(&mut self) -> Result<(), I2C::Error> {
         self.write_masked(
@@ -617,6 +715,67 @@ mod tests {
         }
     }
 
+    struct FifoDiagnosticFakeI2c {
+        queue: VecDeque<(u8, Result<Vec<u8>, FakeError>)>,
+        fifo_rw_calls: usize,
+    }
+
+    impl FifoDiagnosticFakeI2c {
+        fn new(queue: Vec<(u8, Vec<u8>)>) -> Self {
+            Self::with_results(
+                queue
+                    .into_iter()
+                    .map(|(reg, data)| (reg, Ok(data)))
+                    .collect(),
+            )
+        }
+
+        fn with_results(queue: Vec<(u8, Result<Vec<u8>, FakeError>)>) -> Self {
+            Self {
+                queue: queue.into(),
+                fifo_rw_calls: 0,
+            }
+        }
+    }
+
+    impl ErrorType for FifoDiagnosticFakeI2c {
+        type Error = FakeError;
+    }
+
+    impl I2c for FifoDiagnosticFakeI2c {
+        fn read(&mut self, _address: SevenBitAddress, _read: &mut [u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn write(&mut self, _address: SevenBitAddress, _write: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn write_read(
+            &mut self,
+            _address: SevenBitAddress,
+            write: &[u8],
+            read: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            let (register, data) = self.queue.pop_front().expect("missing diagnostic response");
+            assert_eq!(write, &[register]);
+            let data = data?;
+            if register == registers::FIFO_R_W {
+                self.fifo_rw_calls += 1;
+            }
+            read.copy_from_slice(&data[..read.len()]);
+            Ok(())
+        }
+
+        fn transaction(
+            &mut self,
+            _address: SevenBitAddress,
+            _operations: &mut [Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn address_values_match_ad0_pin_state() {
         assert_eq!(Address::Ad0Low.as_u8(), 0x68);
@@ -625,16 +784,18 @@ mod tests {
 
     #[test]
     fn fifo_burst_read_uses_single_transaction() {
-        const FIFO_TEST_BYTES: usize = 12;
         const FIFO_TEST_FILL_BYTE: u8 = 0xA5;
 
-        let fake = FifoFakeI2c::new(std::vec![FIFO_TEST_FILL_BYTE; FIFO_TEST_BYTES]);
+        let fake = FifoFakeI2c::new(std::vec![
+            FIFO_TEST_FILL_BYTE;
+            FIFO_ACCEL_GYRO_FRAME_BYTES
+        ]);
         let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
-        let mut buf = [0_u8; FIFO_TEST_BYTES];
+        let mut buf = [0_u8; FIFO_ACCEL_GYRO_FRAME_BYTES];
 
         mpu.read_fifo_bytes(&mut buf).unwrap();
 
-        assert_eq!(buf, [FIFO_TEST_FILL_BYTE; FIFO_TEST_BYTES]);
+        assert_eq!(buf, [FIFO_TEST_FILL_BYTE; FIFO_ACCEL_GYRO_FRAME_BYTES]);
         assert_eq!(mpu.release().fifo_rw_calls, 1);
     }
 
@@ -647,6 +808,153 @@ mod tests {
         mpu.read_fifo_bytes(&mut buf).unwrap();
 
         assert_eq!(mpu.release().fifo_rw_calls, 0);
+    }
+
+    #[test]
+    fn fifo_diagnostics_reports_fields_and_helpers() {
+        const FIFO_TWO_FRAMES: u16 = (FIFO_ACCEL_GYRO_FRAME_BYTES as u16) * 2;
+        const FIFO_ONE_FRAME: u16 = FIFO_ACCEL_GYRO_FRAME_BYTES as u16;
+
+        let fake = FifoDiagnosticFakeI2c::new(std::vec![
+            (
+                registers::FIFO_COUNTH,
+                FIFO_TWO_FRAMES.to_be_bytes().to_vec()
+            ),
+            (registers::INT_STATUS, std::vec![0]),
+            (
+                registers::FIFO_R_W,
+                std::vec![0x5A; FIFO_ACCEL_GYRO_FRAME_BYTES]
+            ),
+            (
+                registers::FIFO_COUNTH,
+                FIFO_ONE_FRAME.to_be_bytes().to_vec()
+            ),
+        ]);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        let mut buf = [0_u8; FIFO_ACCEL_GYRO_FRAME_BYTES];
+
+        let diagnostics = mpu.read_fifo_bytes_with_diagnostics(&mut buf).unwrap();
+
+        assert_eq!(diagnostics.fifo_count_before_bytes, FIFO_TWO_FRAMES);
+        assert_eq!(diagnostics.fifo_bytes_requested, FIFO_ONE_FRAME);
+        assert_eq!(diagnostics.fifo_count_after_bytes, FIFO_ONE_FRAME);
+        assert!(!diagnostics.fifo_overflow_seen);
+        assert!(diagnostics.int_status_read_ok);
+        assert!(diagnostics.read_len_frame_aligned);
+        assert!(diagnostics.fifo_count_before_frame_aligned);
+        assert!(diagnostics.fifo_count_after_frame_aligned);
+        assert!(diagnostics.had_requested_bytes_before_read);
+        assert!(diagnostics.fifo_count_delta_ok);
+        assert!(diagnostics.frame_usable());
+        assert!(!diagnostics.should_reset_fifo());
+        assert_eq!(mpu.release().fifo_rw_calls, 1);
+    }
+
+    #[test]
+    fn fifo_diagnostics_helpers_flag_overflow_and_misalignment() {
+        let overflow = FifoReadDiagnostics {
+            fifo_count_before_bytes: 24,
+            fifo_bytes_requested: 12,
+            fifo_count_after_bytes: 12,
+            fifo_overflow_seen: true,
+            int_status_read_ok: true,
+            read_len_frame_aligned: true,
+            fifo_count_before_frame_aligned: true,
+            fifo_count_after_frame_aligned: true,
+            had_requested_bytes_before_read: true,
+            fifo_count_delta_ok: true,
+        };
+        assert!(!overflow.frame_usable());
+        assert!(overflow.should_reset_fifo());
+
+        let misaligned_refill = FifoReadDiagnostics {
+            fifo_count_before_bytes: 13,
+            fifo_bytes_requested: 12,
+            fifo_count_after_bytes: 12,
+            fifo_overflow_seen: false,
+            int_status_read_ok: false,
+            read_len_frame_aligned: true,
+            fifo_count_before_frame_aligned: false,
+            fifo_count_after_frame_aligned: true,
+            had_requested_bytes_before_read: true,
+            fifo_count_delta_ok: false,
+        };
+        assert!(!misaligned_refill.frame_usable());
+        assert!(misaligned_refill.should_reset_fifo());
+    }
+
+    fn run_fifo_diagnostics(
+        before: u16,
+        int_status: Result<u8, FakeError>,
+        read_len: usize,
+        after: u16,
+    ) -> FifoReadDiagnostics {
+        let mut queue = std::vec![
+            (registers::FIFO_COUNTH, Ok(before.to_be_bytes().to_vec())),
+            (
+                registers::INT_STATUS,
+                int_status.map(|value| std::vec![value])
+            ),
+        ];
+        if read_len > 0 {
+            queue.push((registers::FIFO_R_W, Ok(std::vec![0x5A; read_len])));
+        }
+        queue.push((registers::FIFO_COUNTH, Ok(after.to_be_bytes().to_vec())));
+        let fake = FifoDiagnosticFakeI2c::with_results(queue);
+        let mut mpu = Mpu6050::new(fake, Address::Ad0Low);
+        let mut buf = std::vec![0_u8; read_len];
+        mpu.read_fifo_bytes_with_diagnostics(&mut buf).unwrap()
+    }
+
+    #[test]
+    fn fifo_diagnostics_zero_before_requested_frame_is_not_usable() {
+        let diagnostics = run_fifo_diagnostics(0, Ok(0), FIFO_ACCEL_GYRO_FRAME_BYTES, 0);
+        assert!(!diagnostics.frame_usable());
+        assert!(!diagnostics.had_requested_bytes_before_read);
+        assert!(!diagnostics.fifo_count_delta_ok);
+    }
+
+    #[test]
+    fn fifo_diagnostics_underflow_requested_two_frames_is_not_usable() {
+        let diagnostics = run_fifo_diagnostics(12, Ok(0), FIFO_ACCEL_GYRO_FRAME_BYTES * 2, 0);
+        assert!(!diagnostics.frame_usable());
+        assert!(!diagnostics.had_requested_bytes_before_read);
+        assert!(!diagnostics.fifo_count_delta_ok);
+    }
+
+    #[test]
+    fn fifo_diagnostics_unaligned_read_length_is_not_usable() {
+        let diagnostics = run_fifo_diagnostics(24, Ok(0), FIFO_ACCEL_GYRO_FRAME_BYTES / 2, 18);
+        assert!(!diagnostics.read_len_frame_aligned);
+        assert!(!diagnostics.frame_usable());
+    }
+
+    #[test]
+    fn fifo_diagnostics_zero_length_is_not_usable() {
+        let diagnostics = run_fifo_diagnostics(0, Ok(0), 0, 0);
+        assert!(diagnostics.read_len_frame_aligned);
+        assert_eq!(diagnostics.fifo_bytes_requested, 0);
+        assert!(!diagnostics.frame_usable());
+    }
+
+    #[test]
+    fn fifo_diagnostics_int_status_error_is_best_effort() {
+        let diagnostics =
+            run_fifo_diagnostics(12, Err(FakeError::Bus), FIFO_ACCEL_GYRO_FRAME_BYTES, 0);
+        assert!(!diagnostics.int_status_read_ok);
+        assert!(!diagnostics.fifo_overflow_seen);
+    }
+
+    #[test]
+    fn fifo_diagnostics_overflow_bit_is_not_usable() {
+        let diagnostics = run_fifo_diagnostics(
+            12,
+            Ok(INT_STATUS_FIFO_OFLOW),
+            FIFO_ACCEL_GYRO_FRAME_BYTES,
+            0,
+        );
+        assert!(diagnostics.fifo_overflow_seen);
+        assert!(!diagnostics.frame_usable());
     }
 
     #[test]
