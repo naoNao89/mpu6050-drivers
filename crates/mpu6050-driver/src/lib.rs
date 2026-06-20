@@ -120,7 +120,11 @@ pub struct FifoReadDiagnostics {
     pub fifo_count_before_bytes: u16,
     pub fifo_bytes_requested: u16,
     pub fifo_count_after_bytes: u16,
-    /// True only when INT_STATUS was read successfully and FIFO_OFLOW was set.
+    /// True only when this diagnostics call successfully read `INT_STATUS`
+    /// and observed `FIFO_OFLOW` set.
+    ///
+    /// This is not persistent overflow history. A previous `INT_STATUS` read
+    /// may consume the overflow flag before this method observes it.
     pub fifo_overflow_seen: bool,
     /// True when INT_STATUS was read successfully.
     pub int_status_read_ok: bool,
@@ -399,8 +403,14 @@ where
 
     /// Reads FIFO bytes and returns diagnostics around the burst read.
     ///
-    /// This reads INT_STATUS best-effort; on MPU-6050-class devices that read
-    /// consumes/clears interrupt status bits.
+    /// `INT_STATUS` is read best-effort. Reading it clears interrupt status
+    /// bits on supported MPU devices. Callers should avoid reading
+    /// `INT_STATUS` immediately before this method when they expect
+    /// `fifo_overflow_seen` to report a pending overflow event.
+    ///
+    /// `fifo_overflow_seen == false` does not prove that overflow never
+    /// occurred, because the flag may have been consumed by an earlier read.
+    /// Frame-alignment diagnostics provide an additional recovery signal.
     pub fn read_fifo_bytes_with_diagnostics(
         &mut self,
         bytes: &mut [u8],
