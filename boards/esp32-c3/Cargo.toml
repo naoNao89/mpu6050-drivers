@@ -8,8 +8,10 @@ license = "MIT"
 binary-frames = []
 
 [dependencies]
+log = "0.4.28"
+mpu6050-driver = { path = "../../crates/mpu6050-driver" }
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-backtrace = { version = "0.18.0", features = ["esp32c3", "panic-handler", "println"] }
 esp-hal = { version = "1.1.1", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.16.1", features = ["esp32c3", "log-04"] }
-log = "0.4.28"
-mpu6050-driver = { path = "../../crates/mpu6050-driver" }

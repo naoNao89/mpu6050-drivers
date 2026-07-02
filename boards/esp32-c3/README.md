@@ -8,3 +8,10 @@ Build, flash, and monitor from the repository root using the root `Makefile` or 
 make build
 ./run.sh
 ```
+
+Check the firmware without building host-only workspace members for the embedded
+target:
+
+```sh
+make check-firmware
+```

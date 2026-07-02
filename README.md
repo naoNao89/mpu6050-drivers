@@ -76,12 +76,17 @@ Build only:
 NO_FLASH=1 NO_MONITOR=1 ./run.sh
 ```
 
-Package checks:
+Package checks are split by target. Host tools and libraries should be checked
+for the development host; ESP firmware should be checked only for the embedded
+target. Do not run the whole workspace for the ESP target, because host tools
+such as `imu-tool` are intentionally `std`/host programs.
 
 ```bash
-cargo check -p imu-core -p imu-validation -p imu-tool
-cargo check -p mpu6050-esp32c3-bringup --target riscv32imc-unknown-none-elf
+make check-host
+make check-firmware
 ```
+
+Use `make check` to run formatting, host checks, and firmware checks together.
 
 ## Independent validation workflow
 

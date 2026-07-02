@@ -1,8 +1,14 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_arch = "riscv32", no_std)]
+#![cfg_attr(target_arch = "riscv32", no_main)]
+#![allow(dead_code)]
+
+#[cfg(not(target_arch = "riscv32"))]
+fn main() {}
 
 use core::fmt;
+#[cfg(target_arch = "riscv32")]
 use esp_backtrace as _;
+#[cfg(target_arch = "riscv32")]
 use esp_hal::{
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -10,12 +16,14 @@ use esp_hal::{
     main,
     time::{Duration, Instant, Rate},
 };
-#[cfg(feature = "binary-frames")]
+#[cfg(all(feature = "binary-frames", target_arch = "riscv32"))]
 use esp_println::Printer;
+#[cfg(target_arch = "riscv32")]
 use esp_println::println;
+use mpu6050_driver::Identity;
+#[cfg(target_arch = "riscv32")]
 use mpu6050_driver::{
-    AccelRange, Address, GyroRange, Identity, Mpu6050, RawAccelGyroTemp, RawReadOutcome,
-    RawRetryPolicy,
+    AccelRange, Address, GyroRange, Mpu6050, RawAccelGyroTemp, RawReadOutcome, RawRetryPolicy,
 };
 
 const MPU_ADDR_AD0_LOW: u8 = 0x68;
@@ -210,6 +218,7 @@ impl IdentityDescription for Identity {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 #[main]
 fn main() -> ! {
     let mut peripherals = esp_hal::init(esp_hal::Config::default());
@@ -289,8 +298,10 @@ fn main() -> ! {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 type BoardMpu<'a> = Mpu6050<I2c<'a, esp_hal::Blocking>>;
 
+#[cfg(target_arch = "riscv32")]
 fn run_advanced_validation(mpu: &mut BoardMpu<'_>, delay: &Delay, address: u8) {
     println!("advanced_validation_begin");
     reset_wake_configure(mpu, delay, address);
@@ -301,6 +312,7 @@ fn run_advanced_validation(mpu: &mut BoardMpu<'_>, delay: &Delay, address: u8) {
     println!("advanced_validation_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn reset_wake_configure(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced reset_wake_begin");
     let reset_ok = mpu.reset().is_ok();
@@ -329,6 +341,7 @@ fn reset_wake_configure(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced reset_wake_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn validate_scale_registers(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced scale_range_begin");
     for setting in 0..=3u8 {
@@ -356,6 +369,7 @@ fn validate_scale_registers(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced scale_range_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn validate_self_test_coarse(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced self_test_begin");
     let _ = mpu.set_accel_range(AccelRange::G2);
@@ -407,6 +421,7 @@ fn validate_self_test_coarse(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8
     println!("advanced self_test_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn validate_fifo_timing(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced fifo_timing_begin");
     let disable_fifo_ok = mpu.disable_fifo_sources().is_ok();
@@ -440,6 +455,7 @@ fn validate_fifo_timing(mpu: &mut BoardMpu<'_>, delay: &Delay, _address: u8) {
     println!("advanced fifo_timing_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn validate_int_status(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced int_status_begin");
     let enable_ok =
@@ -457,6 +473,7 @@ fn validate_int_status(mpu: &mut BoardMpu<'_>, _address: u8) {
     println!("advanced int_status_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn scan_candidates(i2c: I2c<'_, esp_hal::Blocking>) -> I2c<'_, esp_hal::Blocking> {
     println!("I2C candidate scan: 0x68, 0x69");
     let mut mpu = Mpu6050::new(i2c, Address::Ad0Low);
@@ -479,6 +496,7 @@ fn scan_candidates(i2c: I2c<'_, esp_hal::Blocking>) -> I2c<'_, esp_hal::Blocking
     mpu.release()
 }
 
+#[cfg(target_arch = "riscv32")]
 fn probe_imu_driver(mpu: &mut BoardMpu<'_>, address: u8) -> ProbeResult {
     println!("Probing bus_address=0x{:02x}", address);
     let mut who_am_i = None;
@@ -522,6 +540,7 @@ fn probe_imu_driver(mpu: &mut BoardMpu<'_>, address: u8) -> ProbeResult {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 fn log_verification_summary(probe: ProbeResult) {
     let identity = probe.identity;
     let evidence = VerificationEvidence {
@@ -555,6 +574,7 @@ fn log_verification_summary(probe: ProbeResult) {
     println!("verification_summary_end");
 }
 
+#[cfg(target_arch = "riscv32")]
 fn read_motion_sample_retry_once(
     mpu: &mut BoardMpu<'_>,
     address: u8,
@@ -666,7 +686,7 @@ fn read_motion_sample_retry_once(
     }
 }
 
-#[cfg(not(feature = "binary-frames"))]
+#[cfg(all(not(feature = "binary-frames"), target_arch = "riscv32"))]
 fn emit_raw_integrity_event(
     sequence: u64,
     outcome: &str,
@@ -687,6 +707,7 @@ fn emit_raw_integrity_event(
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 fn emit_motion_sample(address: u8, raw_sequence: &mut u64, raw: RawAccelGyroTemp) {
     let timestamp_us = Instant::now().duration_since_epoch().as_micros();
     #[cfg(feature = "binary-frames")]
@@ -718,6 +739,7 @@ fn emit_motion_sample(address: u8, raw_sequence: &mut u64, raw: RawAccelGyroTemp
     *raw_sequence = raw_sequence.wrapping_add(1);
 }
 
+#[cfg(target_arch = "riscv32")]
 fn log_suspicious_sample(reason: &str, address: u8, sequence: u64, raw: RawAccelGyroTemp) {
     #[cfg(not(feature = "binary-frames"))]
     println!(
@@ -737,7 +759,7 @@ fn log_suspicious_sample(reason: &str, address: u8, sequence: u64, raw: RawAccel
     let _ = (reason, address, sequence, raw);
 }
 
-#[cfg(feature = "binary-frames")]
+#[cfg(all(feature = "binary-frames", target_arch = "riscv32"))]
 fn encode_binary_frame(
     address: u8,
     sequence: u64,
@@ -785,6 +807,7 @@ fn crc16_ccitt_false(data: &[u8]) -> u16 {
     crc
 }
 
+#[cfg(target_arch = "riscv32")]
 fn accel_range_from_setting(setting: u8) -> AccelRange {
     match setting {
         0 => AccelRange::G2,
@@ -794,6 +817,7 @@ fn accel_range_from_setting(setting: u8) -> AccelRange {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 fn gyro_range_from_setting(setting: u8) -> GyroRange {
     match setting {
         0 => GyroRange::Dps250,
@@ -803,6 +827,7 @@ fn gyro_range_from_setting(setting: u8) -> GyroRange {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
 fn average_raw(mpu: &mut BoardMpu<'_>, delay: &Delay, samples: i32) -> Option<RawAverage> {
     let mut ax = 0i32;
     let mut ay = 0i32;

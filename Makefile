@@ -31,14 +31,16 @@ BIN := target/$(TARGET)/release/mpu6050-esp32c3-bringup
 
 .DEFAULT_GOAL := help
 
-.PHONY: help fmt check test clippy build flash monitor run clean capture analyze stationary-suite orientation-capture orientation-analyze sixface-capture sixface-analyze sixface-calibration export-csv allan psd smoke validate-stationary validate-orientation imu-tool-smoke
+.PHONY: help fmt check check-host check-firmware test clippy build flash monitor run clean capture analyze stationary-suite orientation-capture orientation-analyze sixface-capture sixface-analyze sixface-calibration export-csv allan psd smoke validate-stationary validate-orientation imu-tool-smoke
 
 help:
 	@printf '%s\n' 'MPU6050 driver workspace'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Core:'
 	@printf '%s\n' '  make fmt                         Format all Rust crates'
-	@printf '%s\n' '  make check                       Run format and cargo checks'
+	@printf '%s\n' '  make check                       Run format, host checks, and firmware checks'
+	@printf '%s\n' '  make check-host                  Run host-side package checks'
+	@printf '%s\n' '  make check-firmware              Run ESP32-C3 firmware target checks'
 	@printf '%s\n' '  make test                        Run host-side tests'
 	@printf '%s\n' '  make clippy                      Run clippy checks'
 	@printf '%s\n' ''
@@ -68,10 +70,15 @@ help:
 fmt:
 	cargo fmt --all
 
-check:
+check: fmt check-host check-firmware
+
+check-host:
 	cargo fmt --all -- --check
 	cargo check --locked -p imu-core -p imu-validation -p imu-tool -p mpu6050-driver --all-targets --all-features
 	cargo check --locked -p imu-core --no-default-features
+
+check-firmware:
+	cargo fmt --all -- --check
 	env -u RUSTFLAGS cargo check --locked -p mpu6050-esp32c3-bringup --target $(TARGET)
 	env -u RUSTFLAGS cargo check --locked -p imu-core --no-default-features --target $(TARGET)
 
